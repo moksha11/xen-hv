@@ -1,0 +1,3062 @@
+/****************************************************************************
+ * (C) 2005-2006 - Emmanuel Ackaouy - XenSource Inc.
+ ****************************************************************************
+ *
+ *        File: common/csched_credit.c
+ *      Author: Emmanuel Ackaouy
+ *
+ * Description: Credit-based SMP CPU scheduler
+ */
+
+#include <xen/config.h>
+#include <xen/init.h>
+#include <xen/lib.h>
+#include <xen/sched.h>
+#include <xen/domain.h>
+#include <xen/delay.h>
+#include <xen/event.h>
+#include <xen/time.h>
+#include <xen/perfc.h>
+#include <xen/sched-if.h>
+#include <xen/softirq.h>
+#include <asm/atomic.h>
+#include <xen/errno.h>
+#include <xen/trace.h>
+
+/*
+ * CSCHED_STATS
+ *
+ * Manage very basic counters and stats.
+ *
+ * Useful for debugging live systems. The stats are displayed
+ * with runq dumps ('r' on the Xen console).
+ */
+#define CSCHED_STATS
+
+// three patches from Naoki Nishiguchi
+//#define ACCURATE_ACCT
+//#define BALANCE_CREDIT
+//#define HANDLING_CREDIT_OVER	// By applying this patch, the credit scheduler don't reset vcpu's credit (set to 0) when the credit would be over upper bound. And it prevents a vcpu from missing becoming active. - Naoki Nishiguchi
+//#define BOOST_CREDIT		// should be matched with ones in include/public/domctl.h
+
+#define RT_VER	10
+#define RT_ABLL
+//#define DYNAMIC_WEIGHT
+//#define DYNAMIC_WEIGHT_INFINITE
+#define DYNAMIC_WEIGHT_MINIMUM		128
+//#define SHARED_CACHE		// when enable 'C', this controls CPU and cache topology, Make sure turn on 'ONLY_ONE_SOCKET' in smpboot.c to enable shared-cache environment when you want this SHARED_CACHE configuration!!!!
+
+//#define NEW_LOAD_BALANCE_SIMPLE_DELAY		0
+#define NEW_LOAD_BALANCE_SIMPLE_DELAY		MILLISECS(2)
+//#define NEW_LOAD_BALANCE_SIMPLE_DELAY		MILLISECS(5)
+
+#ifdef RT_A
+#define LAXITY
+//#define NEW_LOAD_BALANCE
+//#define BOOST_WITH_EVENT	// should be matched with ones in common/event_channel.c
+//#define NEW_LOAD_BALANCE_CACHE	// should be matched with one in common/xenoprof.c. Also make sure check SHARED_CACHE
+#endif
+
+#ifdef RT_B	// LAXITY only marks realtime domain, not really working due to ONLY_BOOST_WITH_EVENT
+#define LAXITY
+#define BOOST_WITH_EVENT	// should be matched with ones in common/event_channel.c
+#define ONLY_BOOST_WITH_EVENT
+#endif
+
+#ifdef RT_AB
+#define LAXITY
+#define BOOST_WITH_EVENT	// should be matched with ones in common/event_channel.c
+#endif
+
+
+#ifdef RT_AL
+#define LAXITY
+#define NEW_LOAD_BALANCE_SIMPLE
+//#define BOOST_WITH_EVENT	// should be matched with ones in common/event_channel.c
+//#define NEW_LOAD_BALANCE_CACHE	// should be matched with one in common/xenoprof.c Also make sure check SHARED_CACHE
+#endif
+
+
+#ifdef RT_ABL
+#define LAXITY
+#define NEW_LOAD_BALANCE_SIMPLE
+#define BOOST_WITH_EVENT	// should be matched with ones in common/event_channel.c
+//#define NEW_LOAD_BALANCE_CACHE	// should be matched with one in common/xenoprof.c Also make sure check SHARED_CACHE
+#endif
+
+#ifdef RT_ALL
+#define LAXITY
+#define NEW_LOAD_BALANCE
+//#define BOOST_WITH_EVENT	// should be matched with ones in common/event_channel.c
+//#define NEW_LOAD_BALANCE_CACHE	// should be matched with one in common/xenoprof.c Also make sure check SHARED_CACHE
+#endif
+
+#ifdef RT_ABLL
+#define LAXITY
+#define NEW_LOAD_BALANCE
+#define BOOST_WITH_EVENT	// should be matched with ones in common/event_channel.c
+//#define NEW_LOAD_BALANCE_CACHE	// should be matched with one in common/xenoprof.c Also make sure check SHARED_CACHE
+#endif
+
+#ifdef RT_ACLL
+#define LAXITY
+#define NEW_LOAD_BALANCE
+//#define BOOST_WITH_EVENT	// should be matched with ones in common/event_channel.c
+#define NEW_LOAD_BALANCE_CACHE	// should be matched with one in common/xenoprof.c Also make sure check SHARED_CACHE
+#endif
+
+#ifdef RT_ABCLL
+#define LAXITY
+#define NEW_LOAD_BALANCE
+#define BOOST_WITH_EVENT	// should be matched with ones in common/event_channel.c
+#define NEW_LOAD_BALANCE_CACHE	// should be matched with one in common/xenoprof.c Also make sure check SHARED_CACHE
+#endif
+
+
+
+/*
+ * Basic constants
+ */
+#define CSCHED_DEFAULT_WEIGHT       256
+#define CSCHED_TICKS_PER_TSLICE     3
+#define CSCHED_TICKS_PER_ACCT       3
+#define CSCHED_MSECS_PER_TICK       10
+#define CSCHED_MSECS_PER_TSLICE     \
+    (CSCHED_MSECS_PER_TICK * CSCHED_TICKS_PER_TSLICE)
+
+#ifdef ACCURATE_ACCT
+#define CSCHED_CREDITS_PER_TICK     10000
+#else
+#define CSCHED_CREDITS_PER_TICK     100
+#endif
+
+#define CSCHED_CREDITS_PER_TSLICE   \
+    (CSCHED_CREDITS_PER_TICK * CSCHED_TICKS_PER_TSLICE)
+#define CSCHED_CREDITS_PER_ACCT     \
+    (CSCHED_CREDITS_PER_TICK * CSCHED_TICKS_PER_ACCT)
+#ifdef BOOST_CREDIT
+#define CSCHED_MSECS_PER_BOOST_TSLICE 2
+#endif
+
+/*
+ * Priorities
+ */
+#define CSCHED_PRI_TS_BOOST      0      /* time-share waking up */
+#define CSCHED_PRI_TS_UNDER     -1      /* time-share w/ credits */
+#define CSCHED_PRI_TS_OVER      -2      /* time-share w/o credits */
+#define CSCHED_PRI_IDLE         -64     /* idle */
+
+
+/*
+ * Flags
+ */
+#define CSCHED_FLAG_VCPU_PARKED 0x0001  /* VCPU over capped credits */
+
+
+/*
+ * Useful macros
+ */
+#define CSCHED_PCPU(_c)     \
+    ((struct csched_pcpu *)per_cpu(schedule_data, _c).sched_priv)
+#define CSCHED_VCPU(_vcpu)  ((struct csched_vcpu *) (_vcpu)->sched_priv)
+#define CSCHED_DOM(_dom)    ((struct csched_dom *) (_dom)->sched_priv)
+#define RUNQ(_cpu)          (&(CSCHED_PCPU(_cpu)->runq))
+
+
+/*
+ * Stats
+ */
+#ifdef CSCHED_STATS
+
+#define CSCHED_STAT(_X)         (csched_priv.stats._X)
+#define CSCHED_STAT_DEFINE(_X)  uint32_t _X;
+#define CSCHED_STAT_PRINTK(_X)                                  \
+    do                                                          \
+    {                                                           \
+        printk("\t%-30s = %u\n", #_X, CSCHED_STAT(_X));  \
+    } while ( 0 );
+
+/*
+ * Try and keep often cranked stats on top so they'll fit on one
+ * cache line.
+ */
+#define CSCHED_STATS_EXPAND_SCHED(_MACRO)   \
+    _MACRO(schedule)                        \
+    _MACRO(acct_run)                        \
+    _MACRO(acct_no_work)                    \
+    _MACRO(acct_balance)                    \
+    _MACRO(acct_reorder)                    \
+    _MACRO(acct_min_credit)                 \
+    _MACRO(acct_vcpu_active)                \
+    _MACRO(acct_vcpu_idle)                  \
+    _MACRO(vcpu_sleep)                      \
+    _MACRO(vcpu_wake_running)               \
+    _MACRO(vcpu_wake_onrunq)                \
+    _MACRO(vcpu_wake_runnable)              \
+    _MACRO(vcpu_wake_not_runnable)          \
+    _MACRO(vcpu_park)                       \
+    _MACRO(vcpu_unpark)                     \
+    _MACRO(tickle_local_idler)              \
+    _MACRO(tickle_local_over)               \
+    _MACRO(tickle_local_under)              \
+    _MACRO(tickle_local_other)              \
+    _MACRO(tickle_idlers_none)              \
+    _MACRO(tickle_idlers_some)              \
+    _MACRO(load_balance_idle)               \
+    _MACRO(load_balance_over)               \
+    _MACRO(load_balance_other)              \
+    _MACRO(steal_trylock_failed)            \
+    _MACRO(steal_peer_idle)                 \
+    _MACRO(migrate_queued)                  \
+    _MACRO(migrate_running)                 \
+    _MACRO(dom_init)                        \
+    _MACRO(dom_destroy)                     \
+    _MACRO(vcpu_init)                       \
+    _MACRO(vcpu_destroy)
+
+#ifndef NDEBUG
+#define CSCHED_STATS_EXPAND_CHECKS(_MACRO)  \
+    _MACRO(vcpu_check)
+#else
+#define CSCHED_STATS_EXPAND_CHECKS(_MACRO)
+#endif
+
+#define CSCHED_STATS_EXPAND(_MACRO)         \
+    CSCHED_STATS_EXPAND_CHECKS(_MACRO)      \
+    CSCHED_STATS_EXPAND_SCHED(_MACRO)
+
+#define CSCHED_STATS_RESET()                                        \
+    do                                                              \
+    {                                                               \
+        memset(&csched_priv.stats, 0, sizeof(csched_priv.stats));   \
+    } while ( 0 )
+
+#define CSCHED_STATS_DEFINE()                   \
+    struct                                      \
+    {                                           \
+        CSCHED_STATS_EXPAND(CSCHED_STAT_DEFINE) \
+    } stats;
+
+#define CSCHED_STATS_PRINTK()                   \
+    do                                          \
+    {                                           \
+        printk("stats:\n");                     \
+        CSCHED_STATS_EXPAND(CSCHED_STAT_PRINTK) \
+    } while ( 0 )
+
+#define CSCHED_STAT_CRANK(_X)               (CSCHED_STAT(_X)++)
+
+#define CSCHED_VCPU_STATS_RESET(_V)                     \
+    do                                                  \
+    {                                                   \
+        memset(&(_V)->stats, 0, sizeof((_V)->stats));   \
+    } while ( 0 )
+
+#define CSCHED_VCPU_STAT_CRANK(_V, _X)      (((_V)->stats._X)++)
+
+#define CSCHED_VCPU_STAT_SET(_V, _X, _Y)    (((_V)->stats._X) = (_Y))
+
+#else /* CSCHED_STATS */
+
+#define CSCHED_STATS_RESET()                do {} while ( 0 )
+#define CSCHED_STATS_DEFINE()
+#define CSCHED_STATS_PRINTK()               do {} while ( 0 )
+#define CSCHED_STAT_CRANK(_X)               do {} while ( 0 )
+#define CSCHED_VCPU_STATS_RESET(_V)         do {} while ( 0 )
+#define CSCHED_VCPU_STAT_CRANK(_V, _X)      do {} while ( 0 )
+#define CSCHED_VCPU_STAT_SET(_V, _X, _Y)    do {} while ( 0 )
+
+#endif /* CSCHED_STATS */
+
+
+#define WAIT_TIME_MEASURE
+
+#ifdef WAIT_TIME_MEASURE
+int boost_from_boost;
+int boost_from_under;
+int boost_from_over;
+int boost_from_idle;
+int print_runq;
+#endif
+
+#ifdef NEW_LOAD_BALANCE
+#define MAX_CANDIDATE		8
+
+#ifdef NEW_LOAD_BALANCE_CACHE
+int cpu2cache[4];
+int cpu2cachecpu[4];
+cpumask_t cache2cpumask[4];
+#ifdef SHARED_CACHE
+#define NUM_CPU_PER_CACHE	2
+#else
+#define NUM_CPU_PER_CACHE	1
+#endif
+#endif
+#endif
+
+int count_boundary_switch;
+int count_task_switch;
+int count_vcpu_switch;
+
+/*
+ * Physical CPU
+ */
+struct csched_pcpu {
+    struct list_head runq;
+    uint32_t runq_sort_last;
+    struct timer ticker;
+    unsigned int tick;
+#ifdef ACCURATE_ACCT
+    s_time_t start_time;
+#else
+#ifdef WAIT_TIME_MEASURE
+    s_time_t start_time;
+#endif
+#endif
+#ifdef BOOST_CREDIT
+    s_time_t time_slice;
+#endif
+#ifdef NEW_LOAD_BALANCE
+    int rtvcpu_count;		// # of rtvcpus
+    s_time_t rtvcpu_usage;	// total cpu use of rtvcpu
+    int rtvcpu_misses;		// total misses of rtvcpu
+    int vcpu_count;		// # of vcpus
+    s_time_t vcpu_usage;	// total cpu use of vcpu
+    int vcpu_misses;		// total misses of vcpu
+
+    struct csched_vcpu *candidate[MAX_CANDIDATE];
+#endif
+};
+
+/*
+ * Virtual CPU
+ */
+struct csched_vcpu {
+    struct list_head runq_elem;
+    struct list_head active_vcpu_elem;
+#ifdef HANDLING_CREDIT_OVER
+    struct list_head inactive_vcpu_elem;
+#endif
+    struct csched_dom *sdom;
+    struct vcpu *vcpu;
+#ifdef BOOST_CREDIT
+    atomic_t boost_credit;
+    int prev_credit;
+#endif
+    atomic_t credit;
+    uint16_t flags;
+    int16_t pri;
+#ifdef CSCHED_STATS
+    struct {
+        int credit_last;
+        uint32_t credit_incr;
+        uint32_t state_active;
+        uint32_t state_idle;
+        uint32_t migrate_q;
+        uint32_t migrate_r;
+    } stats;
+#endif
+#ifdef LAXITY
+	s_time_t last_passed;	// in nano sec
+    unsigned long expected_wait_time;
+    long wt_diff_expected;
+    unsigned long laxity_count;
+    s_time_t laxity;	// in nanosec
+#endif
+#ifdef NEW_LOAD_BALANCE
+    s_time_t usage;
+    unsigned long misses;	// cache miss event from xenoprof
+    int moveto;
+#endif
+#ifdef BOOST_WITH_EVENT
+    int boost_with_event;
+#endif
+#ifdef WAIT_TIME_MEASURE
+
+    // for xentrace
+    s_time_t last_time;		// the time it entered runq
+    int migrate_count;
+
+    unsigned long passed_boost;
+    unsigned long passed_under;
+    unsigned long passed_over;
+    unsigned long wt_count_boost;
+    unsigned long wt_total_boost;
+    unsigned long wt_worst_boost;
+    unsigned long wt_count_under;
+    unsigned long wt_total_under;
+    unsigned long wt_worst_under;
+    unsigned long wt_count_over;
+    unsigned long wt_total_over;
+    unsigned long wt_worst_over;
+#ifdef DYNAMIC_WEIGHT
+    unsigned long count_over;
+    unsigned long count_over_prev;
+#endif
+#endif
+};
+
+/*
+ * Domain
+ */
+struct csched_dom {
+    struct list_head active_vcpu;
+    struct list_head active_sdom_elem;
+    struct domain *dom;
+    uint16_t active_vcpu_count;
+    uint16_t weight;
+    uint16_t cap;
+#ifdef BOOST_CREDIT
+    uint16_t boost_ratio;
+    uint16_t max_boost_period;
+#endif
+};
+
+/*
+ * System-wide private data
+ */
+struct csched_private {
+    spinlock_t lock;
+    struct list_head active_sdom;
+#ifdef HANDLING_CREDIT_OVER
+    struct list_head inactive_vcpu;
+#endif
+    uint32_t ncpus;
+    unsigned int master;
+    cpumask_t idlers;
+    uint32_t weight;
+    uint32_t credit;
+#ifdef BOOST_CREDIT
+    uint32_t boost_credit;
+    uint16_t total_boost_ratio;
+#endif
+    int credit_balance;
+    uint32_t runq_sort;
+#ifdef BOOST_CREDIT
+    s_time_t boost_tslice;
+#endif
+    CSCHED_STATS_DEFINE()
+};
+
+#ifdef WAIT_TIME_MEASURE
+static void reset_measurement(struct csched_vcpu *svc)
+{
+	count_boundary_switch = 0;
+	count_task_switch = 0;
+	count_vcpu_switch = 0;
+	boost_from_boost = 0;
+	boost_from_under = 0;
+	boost_from_over = 0;
+	boost_from_idle = 0;
+	// reset them except last_time, expected_wait_time
+    svc->passed_boost = 0;
+    svc->passed_under = 0;
+    svc->passed_over = 0;
+#ifdef LAXITY
+    svc->wt_diff_expected = 0;
+    svc->laxity_count = 0;
+#endif
+    svc->migrate_count = 0;
+    svc->wt_count_boost = 0;
+    svc->wt_total_boost = 0;
+    svc->wt_worst_boost = 0;
+    svc->wt_count_under = 0;
+    svc->wt_total_under = 0;
+    svc->wt_worst_under = 0;
+    svc->wt_count_over = 0;
+    svc->wt_total_over = 0;
+    svc->wt_worst_over = 0;
+#ifdef BOOST_WITH_EVENT
+    svc->boost_with_event = 0;
+#endif
+}
+#endif
+
+/*
+ * Global variables
+ */
+static struct csched_private csched_priv;
+#ifdef BOOST_CREDIT
+/* opt_credit_tslice: time slice for BOOST priority */
+static unsigned int opt_credit_tslice = CSCHED_MSECS_PER_BOOST_TSLICE;
+integer_param("credit_tslice", opt_credit_tslice);
+#endif
+static void csched_tick(void *_cpu);
+
+static inline int
+__cycle_cpu(int cpu, const cpumask_t *mask)
+{
+    int nxt = next_cpu(cpu, *mask);
+    if (nxt == NR_CPUS)
+        nxt = first_cpu(*mask);
+    return nxt;
+}
+
+static inline int
+__vcpu_on_runq(struct csched_vcpu *svc)
+{
+    return !list_empty(&svc->runq_elem);
+}
+
+static inline struct csched_vcpu *
+__runq_elem(struct list_head *elem)
+{
+    return list_entry(elem, struct csched_vcpu, runq_elem);
+}
+
+static inline void
+__runq_insert(unsigned int cpu, struct csched_vcpu *svc)
+{
+    const struct list_head * const runq = RUNQ(cpu);
+    struct list_head *iter;
+#ifdef LAXITY
+	s_time_t expected_wait_time = 0;
+#endif
+    BUG_ON( __vcpu_on_runq(svc) );
+    BUG_ON( cpu != svc->vcpu->processor );
+
+    list_for_each( iter, runq )
+    {
+        const struct csched_vcpu * const iter_svc = __runq_elem(iter);
+
+        if ( svc->pri > iter_svc->pri )
+            break;
+
+#ifdef LAXITY
+#ifndef ONLY_BOOST_WITH_EVENT
+	if ( !is_idle_vcpu(svc->vcpu) && svc->pri > CSCHED_PRI_TS_OVER && svc->laxity && (svc->laxity < expected_wait_time + iter_svc->last_passed) ) {
+//			printk("d%dv%d has laxity effect\n", svc->vcpu->vcpu_id, svc->vcpu->domain->domain_id);
+			svc->laxity_count++;
+//			if (expected_wait_time == 0)	// can't be zero since it is sum of at least one vcpu, and its last_passed is nonzero
+//				printk("BUG! expected_wait_time == 0?\n");
+			if (iter_svc->pri == CSCHED_PRI_TS_BOOST)
+				svc->pri = CSCHED_PRI_TS_BOOST;
+			break;
+	}
+	expected_wait_time += iter_svc->last_passed;
+#endif
+#endif
+    }
+
+    list_add_tail(&svc->runq_elem, iter);
+#ifdef WAIT_TIME_MEASURE
+	if (is_idle_vcpu(svc->vcpu))
+		svc->last_time = 0;
+	else
+		svc->last_time = NOW();
+#ifdef LAXITY
+	if (is_idle_vcpu(svc->vcpu))
+		svc->expected_wait_time = 0;
+	else {
+		svc->expected_wait_time = expected_wait_time;
+	}
+#endif
+#endif
+}
+
+static inline void
+__runq_remove(struct csched_vcpu *svc)
+{
+    BUG_ON( !__vcpu_on_runq(svc) );
+    list_del_init(&svc->runq_elem);
+}
+
+static inline void
+__runq_tickle(unsigned int cpu, struct csched_vcpu *new)
+{
+    struct csched_vcpu * const cur =
+        CSCHED_VCPU(per_cpu(schedule_data, cpu).curr);
+#ifdef BOOST_CREDIT
+    struct csched_pcpu * const spc = CSCHED_PCPU(cpu);
+#endif
+    cpumask_t mask;
+
+    ASSERT(cur);
+    cpus_clear(mask);
+
+    /* If strictly higher priority than current VCPU, signal the CPU */
+    if ( new->pri > cur->pri )
+    {
+        if ( cur->pri == CSCHED_PRI_IDLE )
+            CSCHED_STAT_CRANK(tickle_local_idler);
+        else if ( cur->pri == CSCHED_PRI_TS_OVER )
+            CSCHED_STAT_CRANK(tickle_local_over);
+        else if ( cur->pri == CSCHED_PRI_TS_UNDER )
+            CSCHED_STAT_CRANK(tickle_local_under);
+        else
+            CSCHED_STAT_CRANK(tickle_local_other);
+
+        cpu_set(cpu, mask);
+    }
+
+    /*
+     * If this CPU has at least two runnable VCPUs, we tickle any idlers to
+     * let them know there is runnable work in the system...
+     */
+    if ( cur->pri > CSCHED_PRI_IDLE )
+    {
+        if ( cpus_empty(csched_priv.idlers) )
+        {
+            CSCHED_STAT_CRANK(tickle_idlers_none);
+        }
+        else
+        {
+            CSCHED_STAT_CRANK(tickle_idlers_some);
+            cpus_or(mask, mask, csched_priv.idlers);
+            cpus_and(mask, mask, new->vcpu->cpu_affinity);
+        }
+    }
+#ifdef BOOST_CREDIT
+    /* If new VCPU has boost credit, signal the CPU. */
+    if ( cpus_empty(mask) &&
+         new->pri == CSCHED_PRI_TS_BOOST &&
+         spc->time_slice != csched_priv.boost_tslice &&
+         new->sdom->max_boost_period )
+    {
+        CSCHED_STAT_CRANK(tickle_local_other);
+        cpu_set(cpu, mask);
+    }
+#endif
+    /* Send scheduler interrupts to designated CPUs */
+    if ( !cpus_empty(mask) )
+        cpumask_raise_softirq(mask, SCHEDULE_SOFTIRQ);
+}
+
+static int
+csched_pcpu_init(int cpu)
+{
+    struct csched_pcpu *spc;
+    unsigned long flags;
+
+    /* Allocate per-PCPU info */
+    spc = xmalloc(struct csched_pcpu);
+    if ( spc == NULL )
+        return -1;
+
+    spin_lock_irqsave(&csched_priv.lock, flags);
+
+    /* Initialize/update system-wide config */
+    csched_priv.credit += CSCHED_CREDITS_PER_ACCT;
+    if ( csched_priv.ncpus <= cpu )
+        csched_priv.ncpus = cpu + 1;
+    if ( csched_priv.master >= csched_priv.ncpus )
+        csched_priv.master = cpu;
+
+    init_timer(&spc->ticker, csched_tick, (void *)(unsigned long)cpu, cpu);
+    INIT_LIST_HEAD(&spc->runq);
+    spc->runq_sort_last = csched_priv.runq_sort;
+    per_cpu(schedule_data, cpu).sched_priv = spc;
+#ifdef ACCURATE_ACCT
+    spc->start_time = 0;
+#endif
+#ifdef NEW_LOAD_BALANCE
+    {
+    int i;
+    for(i=0;i<MAX_CANDIDATE;i++)
+	spc->candidate[i] = NULL;
+    }
+#endif
+    /* Start off idling... */
+    BUG_ON(!is_idle_vcpu(per_cpu(schedule_data, cpu).curr));
+    cpu_set(cpu, csched_priv.idlers);
+
+    spin_unlock_irqrestore(&csched_priv.lock, flags);
+
+    return 0;
+}
+
+#ifndef NDEBUG
+static inline void
+__csched_vcpu_check(struct vcpu *vc)
+{
+    struct csched_vcpu * const svc = CSCHED_VCPU(vc);
+    struct csched_dom * const sdom = svc->sdom;
+
+    BUG_ON( svc->vcpu != vc );
+    BUG_ON( sdom != CSCHED_DOM(vc->domain) );
+    if ( sdom )
+    {
+        BUG_ON( is_idle_vcpu(vc) );
+        BUG_ON( sdom->dom != vc->domain );
+    }
+    else
+    {
+        BUG_ON( !is_idle_vcpu(vc) );
+    }
+
+    CSCHED_STAT_CRANK(vcpu_check);
+}
+#define CSCHED_VCPU_CHECK(_vc)  (__csched_vcpu_check(_vc))
+#else
+#define CSCHED_VCPU_CHECK(_vc)
+#endif
+
+static inline int
+__csched_vcpu_is_migrateable(struct vcpu *vc, int dest_cpu)
+{
+    /*
+     * Don't pick up work that's in the peer's scheduling tail. Also only pick
+     * up work that's allowed to run on our CPU.
+     */
+    return !vc->is_running && cpu_isset(dest_cpu, vc->cpu_affinity);
+}
+
+static int
+csched_cpu_pick(struct vcpu *vc)
+{
+    cpumask_t cpus;
+    cpumask_t idlers;
+    int cpu;
+
+    /*
+     * Pick from online CPUs in VCPU's affinity mask, giving a
+     * preference to its current processor if it's in there.
+     */
+    cpus_and(cpus, cpu_online_map, vc->cpu_affinity);
+    cpu = cpu_isset(vc->processor, cpus)
+            ? vc->processor
+            : __cycle_cpu(vc->processor, &cpus);
+    ASSERT( !cpus_empty(cpus) && cpu_isset(cpu, cpus) );
+
+#ifdef NEW_LOAD_BALANCE
+	{
+	struct csched_vcpu *svc = CSCHED_VCPU(vc);
+
+	if (svc->moveto!=-1 && cpu_isset(svc->moveto, cpus)) {
+		int moveto = svc->moveto;
+		svc->moveto = -1;
+		TRACE_4D(TRC_CSCHED_VCPUINFO11, svc->vcpu->domain->domain_id, svc->vcpu->vcpu_id, moveto, 100);
+		if (moveto != vc->processor)
+			svc->migrate_count++;
+		return moveto;
+	}
+#ifdef NEW_LOAD_BALANCE_CACHE
+#else
+ 	if ( !is_idle_vcpu(svc->vcpu) && svc->laxity) {
+		return cpu;
+	}
+#endif
+	}
+#endif
+
+
+    /*
+     * Try to find an idle processor within the above constraints.
+     *
+     * In multi-core and multi-threaded CPUs, not all idle execution
+     * vehicles are equal!
+     *
+     * We give preference to the idle execution vehicle with the most
+     * idling neighbours in its grouping. This distributes work across
+     * distinct cores first and guarantees we don't do something stupid
+     * like run two VCPUs on co-hyperthreads while there are idle cores
+     * or sockets.
+     */
+    idlers = csched_priv.idlers;
+#ifdef NEW_LOAD_BALANCE_CACHE
+	cpus_and(idlers, idlers, cache2cpumask[cpu2cache[cpu]]);
+/*
+	{
+	int cache1 = CSCHED_PCPU(0)->rtvcpu_misses + CSCHED_PCPU(1)->rtvcpu_misses;
+	int cache2 = CSCHED_PCPU(2)->rtvcpu_misses + CSCHED_PCPU(3)->rtvcpu_misses;
+
+	cpus_clear(idlers);
+	if (cache1 < cache2) {
+		cpu_set(0, idlers);
+		cpu_set(1, idlers);
+	} else {
+		cpu_set(2, idlers);
+		cpu_set(3, idlers);
+	}
+	}
+*/
+#endif
+    cpu_set(cpu, idlers);
+    cpus_and(cpus, cpus, idlers);
+    cpu_clear(cpu, cpus);
+
+    while ( !cpus_empty(cpus) )
+    {
+        cpumask_t cpu_idlers;
+        cpumask_t nxt_idlers;
+        int nxt;
+
+        nxt = __cycle_cpu(cpu, &cpus);
+
+        if ( cpu_isset(cpu, cpu_core_map[nxt]) )
+        {
+            ASSERT( cpu_isset(nxt, cpu_core_map[cpu]) );
+            cpus_and(cpu_idlers, idlers, cpu_sibling_map[cpu]);
+            cpus_and(nxt_idlers, idlers, cpu_sibling_map[nxt]);
+        }
+        else
+        {
+            ASSERT( !cpu_isset(nxt, cpu_core_map[cpu]) );
+            cpus_and(cpu_idlers, idlers, cpu_core_map[cpu]);
+            cpus_and(nxt_idlers, idlers, cpu_core_map[nxt]);
+        }
+
+        if ( cpus_weight(cpu_idlers) < cpus_weight(nxt_idlers) )
+        {
+            cpu = nxt;
+            cpu_clear(cpu, cpus);
+        }
+        else
+        {
+            cpus_andnot(cpus, cpus, nxt_idlers);
+        }
+    }
+
+    return cpu;
+}
+
+static inline void
+#ifdef HANDLING_CREDIT_OVER
+__csched_vcpu_acct_start_locked(struct csched_vcpu *svc)
+#else
+__csched_vcpu_acct_start(struct csched_vcpu *svc)
+#endif
+{
+    struct csched_dom * const sdom = svc->sdom;
+#ifdef HANDLING_CREDIT_OVER
+#else
+    unsigned long flags;
+
+    spin_lock_irqsave(&csched_priv.lock, flags);
+#endif
+    if ( list_empty(&svc->active_vcpu_elem) )
+    {
+        CSCHED_VCPU_STAT_CRANK(svc, state_active);
+        CSCHED_STAT_CRANK(acct_vcpu_active);
+
+        sdom->active_vcpu_count++;
+        list_add(&svc->active_vcpu_elem, &sdom->active_vcpu);
+#ifdef HANDLING_CREDIT_OVER
+        list_del_init(&svc->inactive_vcpu_elem);
+#endif
+        if ( list_empty(&sdom->active_sdom_elem) )
+        {
+            list_add(&sdom->active_sdom_elem, &csched_priv.active_sdom);
+            csched_priv.weight += sdom->weight;
+#ifdef BOOST_CREDIT
+            csched_priv.boost_credit += (sdom->boost_ratio *
+                                         CSCHED_CREDITS_PER_TSLICE) / 100;
+#endif
+        }
+    }
+
+#ifdef HANDLING_CREDIT_OVER
+#else
+    spin_unlock_irqrestore(&csched_priv.lock, flags);
+#endif
+}
+
+static inline void
+__csched_vcpu_acct_stop_locked(struct csched_vcpu *svc)
+{
+    struct csched_dom * const sdom = svc->sdom;
+
+    BUG_ON( list_empty(&svc->active_vcpu_elem) );
+
+    CSCHED_VCPU_STAT_CRANK(svc, state_idle);
+    CSCHED_STAT_CRANK(acct_vcpu_idle);
+
+    sdom->active_vcpu_count--;
+    list_del_init(&svc->active_vcpu_elem);
+#ifdef HANDLING_CREDIT_OVER
+    list_add(&svc->inactive_vcpu_elem, &csched_priv.inactive_vcpu);
+#endif
+    if ( list_empty(&sdom->active_vcpu) )
+    {
+        BUG_ON( csched_priv.weight < sdom->weight );
+        list_del_init(&sdom->active_sdom_elem);
+        csched_priv.weight -= sdom->weight;
+#ifdef BOOST_CREDIT
+        csched_priv.boost_credit -= (sdom->boost_ratio *
+                                     CSCHED_CREDITS_PER_TSLICE) / 100;
+#endif
+    }
+}
+
+static void
+csched_vcpu_acct(unsigned int cpu)
+{
+    struct csched_vcpu * const svc = CSCHED_VCPU(current);
+
+    ASSERT( current->processor == cpu );
+    ASSERT( svc->sdom != NULL );
+
+#ifdef BOOST_CREDIT
+#else
+    /*
+     * If this VCPU's priority was boosted when it last awoke, reset it.
+     * If the VCPU is found here, then it's consuming a non-negligeable
+     * amount of CPU resources and should no longer be boosted.
+     */
+    if ( svc->pri == CSCHED_PRI_TS_BOOST )
+        svc->pri = CSCHED_PRI_TS_UNDER;
+#endif
+
+#ifdef ACCURATE_ACCT
+#else
+    /*
+     * Update credits
+     */
+    atomic_sub(CSCHED_CREDITS_PER_TICK, &svc->credit);
+#endif
+    /*
+     * Put this VCPU and domain back on the active list if it was
+     * idling.
+     *
+     * If it's been active a while, check if we'd be better off
+     * migrating it to run elsewhere (see multi-core and multi-thread
+     * support in csched_cpu_pick()).
+     */
+#ifdef HANDLING_CREDIT_OVER
+    if ( !list_empty(&svc->active_vcpu_elem) &&
+         csched_cpu_pick(current) != cpu )
+#else
+    if ( list_empty(&svc->active_vcpu_elem) )
+    {
+        __csched_vcpu_acct_start(svc);
+    }
+    else if ( csched_cpu_pick(current) != cpu )
+#endif
+    {
+        CSCHED_VCPU_STAT_CRANK(svc, migrate_r);
+        CSCHED_STAT_CRANK(migrate_running);
+        set_bit(_VPF_migrating, &current->pause_flags);
+        cpu_raise_softirq(cpu, SCHEDULE_SOFTIRQ);
+    }
+}
+
+static int
+csched_vcpu_init(struct vcpu *vc)
+{
+    struct domain * const dom = vc->domain;
+    struct csched_dom *sdom = CSCHED_DOM(dom);
+    struct csched_vcpu *svc;
+
+    CSCHED_STAT_CRANK(vcpu_init);
+
+    /* Allocate per-VCPU info */
+    svc = xmalloc(struct csched_vcpu);
+    if ( svc == NULL )
+        return -1;
+
+    INIT_LIST_HEAD(&svc->runq_elem);
+    INIT_LIST_HEAD(&svc->active_vcpu_elem);
+#ifdef HANDLING_CREDIT_OVER
+    INIT_LIST_HEAD(&svc->inactive_vcpu_elem);
+#endif
+    svc->sdom = sdom;
+    svc->vcpu = vc;
+#ifdef BOOST_CREDIT
+    atomic_set(&svc->boost_credit, 0);
+    svc->prev_credit = 0;
+#endif
+#ifdef LAXITY
+    svc->last_passed = 1;
+    svc->laxity = 0;
+#endif
+#ifdef NEW_LOAD_BALANCE
+    svc->usage = 0;
+    svc->misses = 0;
+    svc->moveto = -1;
+#endif
+#ifdef BOOST_WITH_EVENT
+    svc->boost_with_event = 0;
+#endif
+    atomic_set(&svc->credit, 0);
+    svc->flags = 0U;
+    svc->pri = is_idle_domain(dom) ? CSCHED_PRI_IDLE : CSCHED_PRI_TS_UNDER;
+    CSCHED_VCPU_STATS_RESET(svc);
+    vc->sched_priv = svc;
+
+    /* Allocate per-PCPU info */
+    if ( unlikely(!CSCHED_PCPU(vc->processor)) )
+    {
+        if ( csched_pcpu_init(vc->processor) != 0 )
+            return -1;
+    }
+#ifdef HANDLING_CREDIT_OVER
+    /* Add vcpu to inactive queue in order to start acct */
+    if ( !is_idle_vcpu(vc) )
+    {
+        unsigned long flags;
+
+        spin_lock_irqsave(&csched_priv.lock, flags);
+        list_add(&svc->inactive_vcpu_elem, &csched_priv.inactive_vcpu);
+        spin_unlock_irqrestore(&csched_priv.lock, flags);
+    }
+#endif
+
+#ifdef WAIT_TIME_MEASURE
+	reset_measurement(svc);
+	svc->last_time = 1;	// will be set when this enters runq
+#ifdef LAXITY
+	svc->expected_wait_time = 0;
+#endif
+#endif
+#ifdef DYNAMIC_WEIGHT
+    svc->count_over = 0;
+    svc->count_over_prev = 0;
+#endif
+
+    CSCHED_VCPU_CHECK(vc);
+    return 0;
+}
+
+static void
+csched_vcpu_destroy(struct vcpu *vc)
+{
+    struct csched_vcpu * const svc = CSCHED_VCPU(vc);
+    struct csched_dom * const sdom = svc->sdom;
+    unsigned long flags;
+
+    CSCHED_STAT_CRANK(vcpu_destroy);
+
+    BUG_ON( sdom == NULL );
+    BUG_ON( !list_empty(&svc->runq_elem) );
+
+    spin_lock_irqsave(&csched_priv.lock, flags);
+
+    if ( !list_empty(&svc->active_vcpu_elem) )
+        __csched_vcpu_acct_stop_locked(svc);
+#ifdef HANDLING_CREDIT_OVER
+    if ( !list_empty(&svc->inactive_vcpu_elem) )
+        list_del_init(&svc->inactive_vcpu_elem);
+#endif
+    spin_unlock_irqrestore(&csched_priv.lock, flags);
+
+    xfree(svc);
+}
+
+static void
+csched_vcpu_sleep(struct vcpu *vc)
+{
+    struct csched_vcpu * const svc = CSCHED_VCPU(vc);
+
+    CSCHED_STAT_CRANK(vcpu_sleep);
+
+    BUG_ON( is_idle_vcpu(vc) );
+
+    if ( per_cpu(schedule_data, vc->processor).curr == vc )
+        cpu_raise_softirq(vc->processor, SCHEDULE_SOFTIRQ);
+    else if ( __vcpu_on_runq(svc) )
+        __runq_remove(svc);
+}
+
+
+void
+csched_maybe_yield(void)
+{
+#if 0
+    struct domain *d;
+    shared_info_t *s;
+    int i, yield = 0;
+    rcu_read_lock(&domlist_read_lock);
+    for_each_domain( d )
+    {
+	s = d->shared_info;
+	uint32_t *p = __shared_info_addr(d, s, evtchn_pending);
+	for(i=0;i<sizeof(uint32_t) * 8;i++) {
+		if (p[i]) {
+		//	printk("dom%d has pending\n", d->domain_id);
+			yield = 1;
+			break;
+		}
+	}
+    }
+    rcu_read_unlock(&domlist_read_lock);
+	if (yield)
+	    	raise_softirq(SCHEDULE_SOFTIRQ);
+#endif
+}
+
+int print_dynamic_laxity;
+
+void
+csched_stack_switch(unsigned long old, unsigned long esp)
+{
+    	const int cpu = smp_processor_id();
+    	struct csched_pcpu * const spc = CSCHED_PCPU(cpu);
+	s_time_t now = NOW();
+	count_task_switch++;
+	if (get_prio(esp) >= 120 ) {
+		csched_maybe_yield();
+	}
+	if (now - spc->start_time > MILLISECS(20)) {
+		count_boundary_switch++;
+	    	raise_softirq(SCHEDULE_SOFTIRQ);	// yield
+	}
+	if (print_dynamic_laxity) {
+		update_guest_task(old, esp);
+	}
+#if 0
+    struct csched_vcpu * const svc = CSCHED_VCPU(current);
+	if (esp == 0) {
+		svc->laxity = 0;
+	} else {
+		unsigned long prio = translate_into_laxity(esp);
+		ASSERT(prio <= 140);
+		if (prio < 100) {
+			if (print_dynamic_laxity && svc->laxity != prio) {
+				printk("d%dv%d@%d:(%d)", current->domain->domain_id, current->vcpu_id, current->processor, prio);
+				printk("now:%llu\n", now/1000UL);
+			}
+			svc->laxity = prio+1;
+		} else if (prio < 120) {
+			if (print_dynamic_laxity && svc->laxity != 500+25*(prio-100)) {
+				printk("d%dv%d@%d:(%d) ", current->domain->domain_id, current->vcpu_id, current->processor, 500+25*(prio-100));
+				printk("now:%llu\n", now/1000UL);
+			}
+			svc->laxity = 500+25*(prio-100);
+		} else {
+			if (print_dynamic_laxity && svc->laxity != 0) {
+				printk("d%dv%d@%d:(%d) ", current->domain->domain_id, current->vcpu_id, current->processor, 0 );
+				printk("now:%llu\n", now/1000UL);
+			}
+/*			if (svc->laxity) {	// if it goes to non-realtime task, yield.
+				svc->laxity = 0;
+		    		raise_softirq(SCHEDULE_SOFTIRQ);
+			}*/
+			svc->laxity = 0;
+		}
+	}
+#endif
+}
+
+
+#ifdef BOOST_WITH_EVENT
+int
+csched_boost(struct vcpu *vc)
+{
+	struct csched_vcpu * const svc = CSCHED_VCPU(vc);
+	int ret = (svc->pri == CSCHED_PRI_TS_BOOST);	// already boost?
+	svc->pri = CSCHED_PRI_TS_BOOST;
+	return ret;
+}
+
+
+void
+csched_boost_with_event(struct vcpu *vc)
+{
+	struct csched_vcpu * const svc = CSCHED_VCPU(vc);
+	unsigned int cpu;
+	unsigned long flags;
+
+#ifdef WAIT_TIME_MEASURE
+	svc->boost_with_event++;
+#endif
+//		int cpu = vc->processor;
+//		spin_lock(&per_cpu(schedule_data, vc->processor).schedule_lock);
+//	vcpu_schedule_lock_irqsave(vc, flags);
+//    spin_lock_irqsave(&per_cpu(schedule_data, cpu).schedule_lock, flags);
+
+    for ( ; ; )
+    {
+        cpu = vc->processor;
+        spin_lock_irqsave(&per_cpu(schedule_data, cpu).schedule_lock, flags);
+        if ( likely(vc->processor == cpu) )
+            break;
+        spin_unlock_irqrestore(&per_cpu(schedule_data, cpu).schedule_lock, flags);
+    }
+
+//	if ( vc->is_running )
+//		goto done;
+/*
+	if (svc->pri != CSCHED_PRI_TS_UNDER) {
+	if (vc->domain->domain_id == 1)
+		printk("a");
+
+		goto done;
+	}
+*/
+	if ( !__vcpu_on_runq(svc) ) {
+		goto done;
+	}
+
+	__runq_remove(svc);
+	svc->pri = CSCHED_PRI_TS_BOOST;
+//	csched_priv.runq_sort++;
+	__runq_insert(vc->processor, svc);
+    	__runq_tickle(vc->processor, svc);
+//	printk("boost_with_event ");
+done:
+    spin_unlock_irqrestore(&per_cpu(schedule_data, vc->processor).schedule_lock, flags);
+
+//			spin_unlock(&per_cpu(schedule_data, vc->processor).schedule_lock);
+//        vcpu_schedule_unlock_irqrestore(vc, flags);
+//    spin_unlock_irqrestore(&per_cpu(schedule_data, cpu).schedule_lock, flags);
+}
+
+#endif
+
+static void
+csched_vcpu_wake(struct vcpu *vc)
+{
+    struct csched_vcpu * const svc = CSCHED_VCPU(vc);
+    const unsigned int cpu = vc->processor;
+
+    BUG_ON( is_idle_vcpu(vc) );
+
+    if ( unlikely(per_cpu(schedule_data, cpu).curr == vc) )
+    {
+        CSCHED_STAT_CRANK(vcpu_wake_running);
+        return;
+    }
+    if ( unlikely(__vcpu_on_runq(svc)) )
+    {
+        CSCHED_STAT_CRANK(vcpu_wake_onrunq);
+        return;
+    }
+
+    if ( likely(vcpu_runnable(vc)) )
+        CSCHED_STAT_CRANK(vcpu_wake_runnable);
+    else
+        CSCHED_STAT_CRANK(vcpu_wake_not_runnable);
+
+    /*
+     * We temporarly boost the priority of awaking VCPUs!
+     *
+     * If this VCPU consumes a non negligeable amount of CPU, it
+     * will eventually find itself in the credit accounting code
+     * path where its priority will be reset to normal.
+     *
+     * If on the other hand the VCPU consumes little CPU and is
+     * blocking and awoken a lot (doing I/O for example), its
+     * priority will remain boosted, optimizing it's wake-to-run
+     * latencies.
+     *
+     * This allows wake-to-run latency sensitive VCPUs to preempt
+     * more CPU resource intensive VCPUs without impacting overall 
+     * system fairness.
+     *
+     * The one exception is for VCPUs of capped domains unpausing
+     * after earning credits they had overspent. We don't boost
+     * those.
+     */
+    if ( svc->pri == CSCHED_PRI_TS_UNDER &&
+         !(svc->flags & CSCHED_FLAG_VCPU_PARKED) )
+    {
+#ifdef WAIT_TIME_MEASURE
+	if (svc->pri == CSCHED_PRI_TS_BOOST) {
+		boost_from_boost++;
+	} else if (svc->pri == CSCHED_PRI_TS_UNDER) {
+		boost_from_under++;
+	} else if (svc->pri == CSCHED_PRI_TS_OVER) {
+		boost_from_over++;
+	} else if (svc->pri == CSCHED_PRI_IDLE) {
+		boost_from_idle++;
+	}
+#endif
+        svc->pri = CSCHED_PRI_TS_BOOST;
+#ifdef BOOST_CREDIT
+        atomic_add(CSCHED_CREDITS_PER_TICK, &svc->boost_credit);
+        atomic_sub(CSCHED_CREDITS_PER_TICK, &svc->credit);
+#endif
+    }
+
+    /* Put the VCPU on the runq and tickle CPUs */
+    __runq_insert(cpu, svc);
+    __runq_tickle(cpu, svc);
+}
+
+static int
+csched_dom_cntl(
+    struct domain *d,
+    struct xen_domctl_scheduler_op *op)
+{
+    struct csched_dom * const sdom = CSCHED_DOM(d);
+    unsigned long flags;
+
+    if ( op->cmd == XEN_DOMCTL_SCHEDOP_getinfo )
+    {
+        op->u.credit.weight = sdom->weight;
+#ifdef LAXITY
+        op->u.credit.cap = 0;//sdom->laxity/1000UL;
+#else
+        op->u.credit.cap = sdom->cap;
+#endif
+#ifdef BOOST_CREDIT
+        op->u.credit.max_boost_period = sdom->max_boost_period;
+        op->u.credit.boost_ratio = sdom->boost_ratio;
+#endif
+    }
+    else
+    {
+#ifdef BOOST_CREDIT
+        uint16_t weight = (uint16_t)~0U;
+#endif
+        ASSERT(op->cmd == XEN_DOMCTL_SCHEDOP_putinfo);
+
+        spin_lock_irqsave(&csched_priv.lock, flags);
+#ifdef BOOST_CREDIT
+        if ( (op->u.credit.weight != 0) &&
+             (sdom->boost_ratio == 0 || op->u.credit.boost_ratio == 0) )
+        {
+            weight = op->u.credit.weight;
+        }
+
+        if ( op->u.credit.cap != (uint16_t)~0U )
+            sdom->cap = op->u.credit.cap;
+
+        if ( (op->u.credit.max_boost_period != (uint16_t)~0U) &&
+             (op->u.credit.max_boost_period >= CSCHED_MSECS_PER_TICK ||
+              op->u.credit.max_boost_period == 0) )
+        {
+            sdom->max_boost_period = op->u.credit.max_boost_period;
+        }
+
+        if ( (op->u.credit.boost_ratio != (uint16_t)~0U) &&
+             ((csched_priv.total_boost_ratio - sdom->boost_ratio +
+               op->u.credit.boost_ratio) <= 100 * csched_priv.ncpus) &&
+             (sdom->max_boost_period || op->u.credit.boost_ratio == 0) )
+        {
+            uint16_t new_bc, old_bc;
+
+            new_bc = (op->u.credit.boost_ratio *
+                      CSCHED_CREDITS_PER_TSLICE) / 100;
+            old_bc = (sdom->boost_ratio *
+                      CSCHED_CREDITS_PER_TSLICE) / 100;
+
+            csched_priv.total_boost_ratio -= sdom->boost_ratio;
+            csched_priv.total_boost_ratio += op->u.credit.boost_ratio;
+
+            sdom->boost_ratio = op->u.credit.boost_ratio;
+
+            if ( !list_empty(&sdom->active_sdom_elem) )
+            {
+                csched_priv.boost_credit -= old_bc;
+                csched_priv.boost_credit += new_bc;
+            }
+            if ( new_bc == 0 )
+            {
+                if ( sdom->weight == 0 )
+                    weight = CSCHED_DEFAULT_WEIGHT;
+            }
+            else
+                weight = 0;
+        }
+
+        if ( weight != (uint16_t)~0U )
+        {
+            if ( !list_empty(&sdom->active_sdom_elem) )
+            {
+                csched_priv.weight -= sdom->weight;
+                csched_priv.weight += weight;
+            }
+            sdom->weight = weight;
+        }
+#else
+        if ( op->u.credit.weight != 0 )
+        {
+            if ( !list_empty(&sdom->active_sdom_elem) )
+            {
+                csched_priv.weight -= sdom->weight;
+                csched_priv.weight += op->u.credit.weight;
+            }
+            sdom->weight = op->u.credit.weight;
+        }
+#ifdef LAXITY
+#define FIXED_LAXITY_100US
+        if ( op->u.credit.cap != 0 ) {
+#ifdef FIXED_LAXITY_1MS
+            op->u.credit.cap = 1000;	// 1ms
+#endif
+#ifdef FIXED_LAXITY_10MS
+            op->u.credit.cap = 10000;	// 10ms
+#endif
+#ifdef FIXED_LAXITY_40MS
+            op->u.credit.cap = 40000;	// 40ms
+#endif
+#ifdef FIXED_LAXITY_100US
+            op->u.credit.cap = 100;	// 10us
+#endif
+#ifdef FIXED_LAXITY_20MS
+            op->u.credit.cap = 20000;	// 20ms
+#endif
+
+    	struct vcpu *p;
+    	struct csched_vcpu *svc;
+        for_each_vcpu( d, p )
+        {
+		svc = (struct csched_vcpu *)p->sched_priv;
+		svc->laxity = op->u.credit.cap *1000U;
+		printk("set d%dv%d laxity==%dus\n", d->domain_id, p->vcpu_id, (int)(svc->laxity/1000U));
+        }
+
+	}
+#else
+        if ( op->u.credit.cap != (uint16_t)~0U )
+            sdom->cap = op->u.credit.cap;
+#endif
+#endif
+        spin_unlock_irqrestore(&csched_priv.lock, flags);
+    }
+
+    return 0;
+}
+
+static int
+csched_dom_init(struct domain *dom)
+{
+    struct csched_dom *sdom;
+
+    CSCHED_STAT_CRANK(dom_init);
+
+    if ( is_idle_domain(dom) )
+        return 0;
+
+    sdom = xmalloc(struct csched_dom);
+    if ( sdom == NULL )
+        return -ENOMEM;
+
+    /* Initialize credit and weight */
+    INIT_LIST_HEAD(&sdom->active_vcpu);
+    sdom->active_vcpu_count = 0;
+    INIT_LIST_HEAD(&sdom->active_sdom_elem);
+    sdom->dom = dom;
+    sdom->weight = CSCHED_DEFAULT_WEIGHT;
+    sdom->cap = 0U;
+#ifdef BOOST_CREDIT
+    sdom->boost_ratio = 0U;
+    sdom->max_boost_period = 0U;
+#endif
+    dom->sched_priv = sdom;
+
+    return 0;
+}
+
+static void
+csched_dom_destroy(struct domain *dom)
+{
+    CSCHED_STAT_CRANK(dom_destroy);
+    xfree(CSCHED_DOM(dom));
+}
+
+#ifdef BOOST_CREDIT
+/*
+ * This is a O(n) optimized sort of the runq.
+ *
+ * Time-share VCPUs can only be one of three priorities, BOOST, UNDER or OVER.
+ * We walk through the runq and move up any BOOSTs that are preceded by UNDERs
+ * or OVERs, and any UNDERs that are preceded by OVERS. We remember the last
+ * BOOST and UNDER to make the move up operation O(1).
+ */
+#else
+/*
+ * This is a O(n) optimized sort of the runq.
+ *
+ * Time-share VCPUs can only be one of two priorities, UNDER or OVER. We walk
+ * through the runq and move up any UNDERs that are preceded by OVERS. We
+ * remember the last UNDER to make the move up operation O(1).
+ */
+#endif
+static void
+csched_runq_sort(unsigned int cpu)
+{
+    struct csched_pcpu * const spc = CSCHED_PCPU(cpu);
+#ifdef BOOST_CREDIT
+    struct list_head *runq, *elem, *next, *last_boost, *last_under;
+#else
+    struct list_head *runq, *elem, *next, *last_under;
+#endif
+    struct csched_vcpu *svc_elem;
+    unsigned long flags;
+    int sort_epoch;
+
+    sort_epoch = csched_priv.runq_sort;
+    if ( sort_epoch == spc->runq_sort_last )
+        return;
+
+    spc->runq_sort_last = sort_epoch;
+
+    spin_lock_irqsave(&per_cpu(schedule_data, cpu).schedule_lock, flags);
+
+    runq = &spc->runq;
+    elem = runq->next;
+#ifdef BOOST_CREDIT
+    last_boost = last_under = runq;
+#else
+    last_under = runq;
+#endif
+
+    while ( elem != runq )
+    {
+        next = elem->next;
+        svc_elem = __runq_elem(elem);
+#ifdef LAXITY
+/*
+       if (!is_idle_vcpu(svc_elem->vcpu) && svc_elem->sdom->laxity) {
+               elem = next;
+               continue;
+       }
+*/
+#endif
+#ifdef BOOST_CREDIT
+        if ( svc_elem->pri == CSCHED_PRI_TS_BOOST )
+        {
+            /* does elem need to move up the runq? */
+            if ( elem->prev != last_boost )
+            {
+                list_del(elem);
+                list_add(elem, last_boost);
+            }
+            if ( last_boost == last_under )
+                last_under = elem;
+            last_boost = elem;
+        }
+        else if ( svc_elem->pri == CSCHED_PRI_TS_UNDER )
+#else
+        if ( svc_elem->pri >= CSCHED_PRI_TS_UNDER )
+#endif
+        {
+            /* does elem need to move up the runq? */
+            if ( elem->prev != last_under )
+            {
+                list_del(elem);
+                list_add(elem, last_under);
+            }
+            last_under = elem;
+        }
+
+        elem = next;
+    }
+
+    spin_unlock_irqrestore(&per_cpu(schedule_data, cpu).schedule_lock, flags);
+}
+
+
+#ifdef NEW_LOAD_BALANCE
+static void
+csched_acct_1sec(void)
+{
+//    unsigned long flags;
+//    struct list_head *iter_vcpu, *next_vcpu;
+//    struct list_head *iter_sdom, *next_sdom;
+    struct csched_vcpu *svc;
+    struct csched_dom *sdom;
+
+    int           i,j,k;
+#ifdef NEW_LOAD_BALANCE_CACHE
+    int		fallback = 0;
+#endif
+    struct csched_pcpu *spc;
+    s_time_t	smallest = SECONDS(10);		// just large value
+    s_time_t	biggest = 0;
+    int		smallest_pcpu = -1;
+    int		biggest_pcpu = -1;
+
+    struct vcpu *p;
+    struct domain      *d;
+
+    for_each_online_cpu ( i )
+    {
+    	spc = CSCHED_PCPU( i );
+
+	spc->vcpu_count = spc->rtvcpu_count = 0;
+	spc->vcpu_usage = spc->rtvcpu_usage = 0;
+	spc->vcpu_misses = spc->rtvcpu_misses = 0;
+        for(j=0;j<MAX_CANDIDATE;j++)
+	    spc->candidate[j] = NULL;
+    }
+//    spin_lock_irqsave(&csched_priv.lock, flags);
+    rcu_read_lock(&domlist_read_lock);
+    for_each_domain( d )
+    {
+        for_each_vcpu( d, p )
+        {
+		svc = (struct csched_vcpu *)p->sched_priv;
+		if (svc) {
+		    i = svc->vcpu->processor;
+#ifdef NEW_LOAD_BALANCE_CACHE
+		    spc = CSCHED_PCPU( cpu2cachecpu[i] );
+#else
+		    spc = CSCHED_PCPU( i );
+#endif
+		    sdom = svc->sdom;
+
+#ifdef NEW_LOAD_BALANCE_CACHE
+			if (spc->vcpu_count < MAX_CANDIDATE-1)	// candidate[MAX_CANDIDATE-1] is always null
+				spc->candidate[spc->vcpu_count] = svc;
+#endif
+		    if (svc->laxity) {
+#ifndef NEW_LOAD_BALANCE_CACHE
+			if (spc->rtvcpu_count < MAX_CANDIDATE-1)
+				spc->candidate[spc->rtvcpu_count] = svc;
+#endif
+			spc->rtvcpu_misses += svc->misses;
+		        spc->rtvcpu_usage += svc->usage;
+		        spc->rtvcpu_count++;
+		    }
+		    spc->vcpu_misses += svc->misses;
+		    spc->vcpu_usage += svc->usage;
+		    spc->vcpu_count++;
+#ifdef NEW_LOAD_BALANCE_CACHE
+		    if (spc->vcpu_usage > MILLISECS(950)*NUM_CPU_PER_CACHE ) {
+			fallback = 1;
+		    }
+#endif
+#ifdef WAIT_TIME_MEASURE
+		    if (print_runq)
+			    TRACE_5D(TRC_CSCHED_VCPUINFO10, sdom->dom->domain_id, svc->vcpu->vcpu_id, i, svc->usage/1000UL, svc->misses);
+#endif
+		}
+        }
+    }
+    rcu_read_unlock(&domlist_read_lock);
+//    spin_unlock_irqrestore(&csched_priv.lock, flags);
+
+
+    for_each_online_cpu ( i )
+    {
+#ifdef NEW_LOAD_BALANCE_CACHE
+	if (i != cpu2cachecpu[i])
+		continue;
+#endif
+    	spc = CSCHED_PCPU( i );
+
+	// simple sorting
+#ifdef NEW_LOAD_BALANCE_CACHE
+	for(j=0;j<spc->vcpu_count-1;j++) {
+		if (spc->candidate[j] == NULL)
+			break;
+		for(k=j+1;k<spc->vcpu_count;k++) 
+#else
+	for(j=0;j<spc->rtvcpu_count-1;j++) {
+		if (spc->candidate[j] == NULL)
+			break;
+		for(k=j+1;k<spc->rtvcpu_count;k++) 
+#endif
+		{
+			int a,b;
+			if (spc->candidate[k] == NULL)
+				break;
+#ifdef NEW_LOAD_BALANCE_CACHE
+			if (fallback) {
+				a = spc->candidate[j]->usage;
+				b = spc->candidate[k]->usage;
+			} else {
+				a = spc->candidate[j]->misses;
+				b = spc->candidate[k]->misses;
+			}
+#else
+			a = spc->candidate[j]->usage;
+			b = spc->candidate[k]->usage;
+#endif
+			if (a < b)
+			{
+				struct csched_vcpu *temp = spc->candidate[j];
+				spc->candidate[j] = spc->candidate[k];
+				spc->candidate[k] = temp;
+			}
+		}
+#ifdef NEW_LOAD_BALANCE_CACHE
+	}
+#else
+	}
+#endif
+#ifdef WAIT_TIME_MEASURE
+	if (print_runq) {
+		TRACE_5D(TRC_CSCHED_VCPUINFO9, i, spc->vcpu_count, spc->vcpu_usage/1000UL, spc->rtvcpu_count, spc->rtvcpu_usage/1000UL );
+	}
+#endif
+
+#ifdef NEW_LOAD_BALANCE_CACHE
+	if (!fallback) {
+		if (spc->vcpu_misses < smallest) {
+			smallest = spc->vcpu_misses;
+			smallest_pcpu = i;
+		}
+		if (spc->vcpu_count <= 1)
+			continue;
+		if (spc->vcpu_misses > biggest) {
+			biggest = spc->vcpu_misses;
+			biggest_pcpu = i;
+		}
+	} else {
+		if (spc->vcpu_usage < smallest) {
+			smallest = spc->vcpu_usage;
+			smallest_pcpu = i;
+		}
+		if (spc->vcpu_count <= 1)
+			continue;
+		if (spc->vcpu_usage > biggest) {
+			biggest = spc->vcpu_usage;
+			biggest_pcpu = i;
+		}
+	}
+#else
+	if (spc->rtvcpu_usage < smallest) {
+		smallest = spc->rtvcpu_usage;
+		smallest_pcpu = i;
+	}
+	if (spc->rtvcpu_count <= 1)
+		continue;
+	if (spc->rtvcpu_usage > biggest) {
+		biggest = spc->rtvcpu_usage;
+		biggest_pcpu = i;
+	}
+#endif
+    }
+
+    if ( smallest_pcpu != biggest_pcpu && biggest_pcpu != -1 && smallest_pcpu != -1 ) {
+	spc = CSCHED_PCPU( biggest_pcpu );
+#ifdef NEW_LOAD_BALANCE_CACHE
+	for(i=0;i<spc->vcpu_count;i++) 
+#else
+	for(i=0;i<spc->rtvcpu_count;i++) 
+#endif
+	{
+		svc = spc->candidate[i];
+		if (svc == NULL) {
+			break;
+		}
+#ifdef NEW_LOAD_BALANCE_CACHE
+		if (!fallback) {
+			if (svc->misses < biggest-smallest ) {
+				svc->moveto = smallest_pcpu;
+				break;
+			}
+		} else {
+#endif
+			if (svc->usage < biggest-smallest ) {
+				svc->moveto = smallest_pcpu;
+				break;
+			}
+#ifdef NEW_LOAD_BALANCE_CACHE
+		}
+#endif
+	}
+    }
+
+#ifdef WAIT_TIME_MEASURE
+	print_runq = 0;
+#endif
+    rcu_read_lock(&domlist_read_lock);
+    for_each_domain( d )
+    {
+        for_each_vcpu( d, p )
+        {
+		svc = (struct csched_vcpu *)p->sched_priv;
+		if (svc) {
+		    svc->usage = 0;	//reset
+		    svc->misses = 0;
+		}
+        }
+    }
+    rcu_read_unlock(&domlist_read_lock);
+}
+#endif
+
+
+static void
+csched_acct(void)
+{
+    unsigned long flags;
+    struct list_head *iter_vcpu, *next_vcpu;
+    struct list_head *iter_sdom, *next_sdom;
+    struct csched_vcpu *svc;
+    struct csched_dom *sdom;
+    uint32_t credit_total;
+    uint32_t weight_total;
+    uint32_t weight_left;
+    uint32_t credit_fair;
+    uint32_t credit_peak;
+    uint32_t credit_cap;
+    int credit_balance;
+    int credit_xtra;
+    int credit;
+#ifdef BALANCE_CREDIT
+    int64_t credit_sum;
+    int credit_average;
+#endif
+#ifdef BOOST_CREDIT
+    /* for boost credit */
+    uint32_t bc_total;
+    uint32_t bc_fair;
+    int boost_credit;
+    int max_boost_credit;
+    int64_t bc_sum;
+    int bc_average;
+#endif
+
+    spin_lock_irqsave(&csched_priv.lock, flags);
+#ifdef HANDLING_CREDIT_OVER
+    /* Add vcpu to active list when its credit were consumed by one tick. */
+    list_for_each_safe( iter_vcpu, next_vcpu, &csched_priv.inactive_vcpu )
+    {
+        svc = list_entry(iter_vcpu, struct csched_vcpu, inactive_vcpu_elem);
+#ifdef BOOST_CREDIT
+        max_boost_credit = svc->sdom->max_boost_period *
+                           (CSCHED_CREDITS_PER_TSLICE/CSCHED_MSECS_PER_TSLICE);
+        if ( (atomic_read(&svc->credit)
+              <= CSCHED_CREDITS_PER_TICK * (CSCHED_TICKS_PER_ACCT - 1)) ||
+             (atomic_read(&svc->boost_credit)
+              <= (max_boost_credit - CSCHED_CREDITS_PER_TICK)) )
+#else
+        if ( atomic_read(&svc->credit)
+             <= CSCHED_CREDITS_PER_TICK * (CSCHED_TICKS_PER_ACCT - 1) )
+#endif
+        {
+            __csched_vcpu_acct_start_locked(svc);
+        }
+    }
+#endif
+
+
+#ifdef DYNAMIC_WEIGHT
+    list_for_each_safe( iter_sdom, next_sdom, &csched_priv.active_sdom )
+    {
+        sdom = list_entry(iter_sdom, struct csched_dom, active_sdom_elem);
+	if (!sdom->laxity)
+		continue;
+        list_for_each_safe( iter_vcpu, next_vcpu, &sdom->active_vcpu )
+        {
+            svc = list_entry(iter_vcpu, struct csched_vcpu, active_vcpu_elem);
+            BUG_ON( sdom != svc->sdom );
+
+            if (svc->count_over) {
+		if (svc->count_over_prev) {
+			if ( !list_empty(&sdom->active_sdom_elem) )
+			{
+				csched_priv.weight+=3;
+			}
+			sdom->weight+=3;
+		} else {
+			if ( !list_empty(&sdom->active_sdom_elem) )
+			{
+				csched_priv.weight ++;
+			}
+			sdom->weight++;
+		}
+            } else if (sdom->weight > DYNAMIC_WEIGHT_MINIMUM) {
+		if ( !list_empty(&sdom->active_sdom_elem) )
+		{
+			csched_priv.weight --;
+		}
+		sdom->weight--;
+	    }
+	    svc->count_over_prev = svc->count_over;
+	    svc->count_over = 0;
+        }
+    }
+#endif
+
+
+    weight_total = csched_priv.weight;
+    credit_total = csched_priv.credit;
+#ifdef BOOST_CREDIT
+    bc_total = csched_priv.boost_credit;
+#endif
+    /* Converge balance towards 0 when it drops negative */
+    if ( csched_priv.credit_balance < 0 )
+    {
+        credit_total -= csched_priv.credit_balance;
+        CSCHED_STAT_CRANK(acct_balance);
+    }
+#ifdef BOOST_CREDIT
+    if ( unlikely(weight_total == 0 && bc_total == 0) )
+#else
+    if ( unlikely(weight_total == 0) )
+#endif
+    {
+        csched_priv.credit_balance = 0;
+        spin_unlock_irqrestore(&csched_priv.lock, flags);
+        CSCHED_STAT_CRANK(acct_no_work);
+        return;
+    }
+
+    CSCHED_STAT_CRANK(acct_run);
+
+    weight_left = weight_total;
+    credit_balance = 0;
+    credit_xtra = 0;
+    credit_cap = 0U;
+#ifdef BOOST_CREDIT
+    /* Firstly, subtract boost credits from credit_total. */
+    if ( bc_total != 0 )
+    {
+        credit_total -= bc_total;
+        credit_balance += bc_total;
+    }
+
+    /* Avoid 0 divide error */
+    if ( weight_total == 0 )
+        weight_total = 1;
+#endif
+    list_for_each_safe( iter_sdom, next_sdom, &csched_priv.active_sdom )
+    {
+        sdom = list_entry(iter_sdom, struct csched_dom, active_sdom_elem);
+
+        BUG_ON( is_idle_domain(sdom->dom) );
+        BUG_ON( sdom->active_vcpu_count == 0 );
+#ifdef BOOST_CREDIT
+#else
+        BUG_ON( sdom->weight == 0 );
+#endif
+        BUG_ON( sdom->weight > weight_left );
+#ifdef BOOST_CREDIT
+        max_boost_credit = sdom->max_boost_period *
+                           (CSCHED_CREDITS_PER_TSLICE / CSCHED_MSECS_PER_TSLICE);
+
+        /*
+         *  Compute the average of active VCPUs
+         *  and adjust credit for comsumption too much.
+         */
+        credit_sum = 0;
+        bc_sum = 0;
+        list_for_each_safe( iter_vcpu, next_vcpu, &sdom->active_vcpu )
+        {
+            int adjust;
+
+            svc = list_entry(iter_vcpu, struct csched_vcpu, active_vcpu_elem);
+            BUG_ON( sdom != svc->sdom );
+
+            credit = atomic_read(&svc->credit);
+            boost_credit = atomic_read(&svc->boost_credit);
+            adjust = svc->prev_credit - (credit + boost_credit)
+                   - CSCHED_CREDITS_PER_TSLICE;
+            if ( adjust > 0 )
+            {
+                if ( max_boost_credit != 0 )
+                    atomic_add(adjust, &svc->boost_credit);
+                else
+                    atomic_add(adjust, &svc->credit);
+            }
+
+            credit_sum += atomic_read(&svc->credit);
+            bc_sum += atomic_read(&svc->boost_credit);
+        }
+        credit_average = ( credit_sum + (sdom->active_vcpu_count - 1)
+                         ) / sdom->active_vcpu_count;
+        bc_average = ( bc_sum + (sdom->active_vcpu_count - 1)
+                     ) / sdom->active_vcpu_count;
+#else
+#ifdef BALANCE_CREDIT
+        /* Compute the average of active VCPUs. */
+        credit_sum = 0;
+        list_for_each_safe( iter_vcpu, next_vcpu, &sdom->active_vcpu )
+        {
+            svc = list_entry(iter_vcpu, struct csched_vcpu, active_vcpu_elem);
+            BUG_ON( sdom != svc->sdom );
+
+            credit_sum += atomic_read(&svc->credit);
+        }
+        credit_average = ( credit_sum + (sdom->active_vcpu_count - 1)
+                         ) / sdom->active_vcpu_count;
+#endif
+#endif
+        weight_left -= sdom->weight;
+
+        /*
+         * A domain's fair share is computed using its weight in competition
+         * with that of all other active domains.
+         *
+         * At most, a domain can use credits to run all its active VCPUs
+         * for one full accounting period. We allow a domain to earn more
+         * only when the system-wide credit balance is negative.
+         */
+        credit_peak = sdom->active_vcpu_count * CSCHED_CREDITS_PER_ACCT;
+        if ( csched_priv.credit_balance < 0 )
+        {
+            credit_peak += ( ( -csched_priv.credit_balance * sdom->weight) +
+                             (weight_total - 1)
+                           ) / weight_total;
+        }
+
+        if ( sdom->cap != 0U )
+        {
+            credit_cap = ((sdom->cap * CSCHED_CREDITS_PER_ACCT) + 99) / 100;
+            if ( credit_cap < credit_peak )
+                credit_peak = credit_cap;
+
+            credit_cap = ( credit_cap + ( sdom->active_vcpu_count - 1 )
+                         ) / sdom->active_vcpu_count;
+        }
+
+        credit_fair = ( ( credit_total * sdom->weight) + (weight_total - 1)
+                      ) / weight_total;
+
+        if ( credit_fair < credit_peak )
+        {
+#ifdef BOOST_CREDIT
+            /* credit_fair is 0 if weight is 0. */
+            if ( sdom->weight != 0 )
+                credit_xtra = 1;
+#else
+            credit_xtra = 1;
+#endif
+        }
+        else
+        {
+            if ( weight_left != 0U )
+            {
+                /* Give other domains a chance at unused credits */
+                credit_total += ( ( ( credit_fair - credit_peak
+                                    ) * weight_total
+                                  ) + ( weight_left - 1 )
+                                ) / weight_left;
+            }
+
+            if ( credit_xtra )
+            {
+                /*
+                 * Lazily keep domains with extra credits at the head of
+                 * the queue to give others a chance at them in future
+                 * accounting periods.
+                 */
+                CSCHED_STAT_CRANK(acct_reorder);
+                list_del(&sdom->active_sdom_elem);
+                list_add(&sdom->active_sdom_elem, &csched_priv.active_sdom);
+            }
+
+            credit_fair = credit_peak;
+        }
+
+        /* Compute fair share per VCPU */
+        credit_fair = ( credit_fair + ( sdom->active_vcpu_count - 1 )
+                      ) / sdom->active_vcpu_count;
+#ifdef BOOST_CREDIT
+        /* Compute fair share of boost credit per VCPU */
+        bc_fair = ( ((sdom->boost_ratio * CSCHED_CREDITS_PER_ACCT)/100) +
+                    (sdom->active_vcpu_count - 1)
+                  ) / sdom->active_vcpu_count;
+#endif
+
+        list_for_each_safe( iter_vcpu, next_vcpu, &sdom->active_vcpu )
+        {
+            svc = list_entry(iter_vcpu, struct csched_vcpu, active_vcpu_elem);
+            BUG_ON( sdom != svc->sdom );
+#ifdef BALANCE_CREDIT
+            /* Balance and increment credit */
+            credit = atomic_read(&svc->credit);
+            atomic_add(credit_average - credit + credit_fair, &svc->credit);
+#else
+            /* Increment credit */
+            atomic_add(credit_fair, &svc->credit);
+#endif
+            credit = atomic_read(&svc->credit);
+
+#ifdef BOOST_CREDIT
+            /* Balance and increment boost credit */
+            boost_credit = atomic_read(&svc->boost_credit);
+            atomic_add(bc_average - boost_credit + bc_fair, &svc->boost_credit);
+            boost_credit = atomic_read(&svc->boost_credit);
+
+            /*
+             * Upper bound on credits.
+             * Add excess to boost credit.
+             */
+            if ( credit > CSCHED_CREDITS_PER_TSLICE )
+            {
+                atomic_add(credit - CSCHED_CREDITS_PER_TSLICE,
+                           &svc->boost_credit);
+                boost_credit = atomic_read(&svc->boost_credit);
+                credit = CSCHED_CREDITS_PER_TSLICE;
+                atomic_set(&svc->credit, credit);
+            }
+            /*
+             * Upper bound on boost credits.
+             * Add excess to credit.
+             */
+            if ( boost_credit > max_boost_credit )
+            {
+                atomic_add(boost_credit - max_boost_credit, &svc->credit);
+                credit = atomic_read(&svc->credit);
+                boost_credit = max_boost_credit;
+                atomic_set(&svc->boost_credit, boost_credit);
+            }
+            /*
+             * If credit is negative,
+             * boost credits compensate credit.
+             */
+            if ( credit < 0 && boost_credit > 0 )
+            {
+                if ( boost_credit > -credit )
+                {
+                    atomic_sub(-credit, &svc->boost_credit);
+                    atomic_add(-credit, &svc->credit);
+                }
+                else
+                {
+                    atomic_sub(boost_credit, &svc->boost_credit);
+                    atomic_add(boost_credit, &svc->credit);
+                }
+                credit = atomic_read(&svc->credit);
+                boost_credit = atomic_read(&svc->boost_credit);
+            }
+#endif
+
+            /*
+             * Recompute priority or, if VCPU is idling, remove it from
+             * the active list.
+             */
+            if ( credit < 0 )
+            {
+#ifdef DYNAMIC_WEIGHT_INFINITE
+ 		if ( is_idle_vcpu(svc->vcpu) || !svc->sdom->laxity)
+		{
+#endif
+                svc->pri = CSCHED_PRI_TS_OVER;
+
+                /* Park running VCPUs of capped-out domains */
+                if ( sdom->cap != 0U &&
+                     credit < -credit_cap &&
+                     !(svc->flags & CSCHED_FLAG_VCPU_PARKED) )
+                {
+                    CSCHED_STAT_CRANK(vcpu_park);
+                    vcpu_pause_nosync(svc->vcpu);
+                    svc->flags |= CSCHED_FLAG_VCPU_PARKED;
+                }
+#ifdef DYNAMIC_WEIGHT_INFINITE
+		} else {
+		}
+#endif
+                /* Lower bound on credits */
+                if ( credit < -CSCHED_CREDITS_PER_TSLICE )
+                {
+                    CSCHED_STAT_CRANK(acct_min_credit);
+                    credit = -CSCHED_CREDITS_PER_TSLICE;
+                    atomic_set(&svc->credit, credit);
+                }
+            }
+            else
+            {
+#ifdef BOOST_CREDIT
+                if ( boost_credit > 0 )
+                    svc->pri = CSCHED_PRI_TS_BOOST;
+                else
+                    svc->pri = CSCHED_PRI_TS_UNDER;
+#else
+                svc->pri = CSCHED_PRI_TS_UNDER;
+#endif
+                /* Unpark any capped domains whose credits go positive */
+                if ( svc->flags & CSCHED_FLAG_VCPU_PARKED)
+                {
+                    /*
+                     * It's important to unset the flag AFTER the unpause()
+                     * call to make sure the VCPU's priority is not boosted
+                     * if it is woken up here.
+                     */
+                    CSCHED_STAT_CRANK(vcpu_unpark);
+                    vcpu_unpause(svc->vcpu);
+                    svc->flags &= ~CSCHED_FLAG_VCPU_PARKED;
+                }
+
+#ifdef BOOST_CREDIT
+                /*
+                 * Upper bound on credits and boost credits means VCPU stops
+                 * earning
+                 */
+#else
+                /* Upper bound on credits means VCPU stops earning */
+#endif
+                if ( credit > CSCHED_CREDITS_PER_TSLICE )
+                {
+#ifdef BOOST_CREDIT
+                    credit = CSCHED_CREDITS_PER_TSLICE;
+                    atomic_set(&svc->credit, credit);
+
+                    if ( boost_credit >= max_boost_credit )
+                    {
+                        __csched_vcpu_acct_stop_locked(svc);
+                    }
+#else
+                    __csched_vcpu_acct_stop_locked(svc);
+#ifdef HANDLING_CREDIT_OVER
+                    credit = CSCHED_CREDITS_PER_TSLICE;
+#else
+                    credit = 0;
+#endif
+                    atomic_set(&svc->credit, credit);
+#endif
+                }
+            }
+
+#ifdef BOOST_CREDIT
+            /* save credit for adjustment */
+            svc->prev_credit = credit + boost_credit;
+
+            if ( sdom->boost_ratio == 0 )
+            {
+                CSCHED_VCPU_STAT_SET(svc, credit_last, credit);
+                CSCHED_VCPU_STAT_SET(svc, credit_incr, credit_fair);
+                credit_balance += credit;
+            }
+            else
+            {
+                CSCHED_VCPU_STAT_SET(svc, credit_last, boost_credit);
+                CSCHED_VCPU_STAT_SET(svc, credit_incr, bc_fair);
+            }
+#else
+            CSCHED_VCPU_STAT_SET(svc, credit_last, credit);
+            CSCHED_VCPU_STAT_SET(svc, credit_incr, credit_fair);
+            credit_balance += credit;
+#endif
+        }
+    }
+
+    csched_priv.credit_balance = credit_balance;
+
+    spin_unlock_irqrestore(&csched_priv.lock, flags);
+
+    /* Inform each CPU that its runq needs to be sorted */
+    csched_priv.runq_sort++;
+}
+
+#ifdef WAIT_TIME_MEASURE
+static void csched_myrecord(void);
+#endif
+
+static void
+csched_tick(void *_cpu)
+{
+    unsigned int cpu = (unsigned long)_cpu;
+    struct csched_pcpu *spc = CSCHED_PCPU(cpu);
+
+    spc->tick++;
+
+    /*
+     * Accounting for running VCPU
+     */
+    if ( !is_idle_vcpu(current) )
+        csched_vcpu_acct(cpu);
+
+    /*
+     * Host-wide accounting duty
+     *
+     * Note: Currently, this is always done by the master boot CPU. Eventually,
+     * we could distribute or at the very least cycle the duty.
+     */
+    if ( (csched_priv.master == cpu) &&
+         (spc->tick % CSCHED_TICKS_PER_ACCT) == 0 )
+    {
+        csched_acct();
+    }
+
+#ifdef WAIT_TIME_MEASURE
+    if ( (csched_priv.master == cpu) &&
+         (spc->tick % 1000) == 0 )	// 10sec
+    {
+	csched_myrecord();
+    }
+#endif
+
+#ifdef NEW_LOAD_BALANCE
+    if ( (csched_priv.master == cpu) &&
+         (spc->tick % 100) == 0 )	// 1sec
+    {
+    	if ((spc->tick % 1000) == 0)
+		print_runq = 1;		// we sameple every 10th
+    	csched_acct_1sec();
+    }
+
+#endif
+    /*
+     * Check if runq needs to be sorted
+     *
+     * Every physical CPU resorts the runq after the accounting master has
+     * modified priorities. This is a special O(n) sort and runs at most
+     * once per accounting period (currently 30 milliseconds).
+     */
+    csched_runq_sort(cpu);
+
+    set_timer(&spc->ticker, NOW() + MILLISECS(CSCHED_MSECS_PER_TICK));
+}
+
+static struct csched_vcpu *
+#if defined(NEW_LOAD_BALANCE) || defined(NEW_LOAD_BALANCE_SIMPLE)
+csched_runq_steal(int peer_cpu, int cpu, struct csched_vcpu *snext)
+{
+	int pri = snext->pri;
+#else
+csched_runq_steal(int peer_cpu, int cpu, int pri)
+{
+#endif
+    const struct csched_pcpu * const peer_pcpu = CSCHED_PCPU(peer_cpu);
+    const struct vcpu * const peer_vcpu = per_cpu(schedule_data, peer_cpu).curr;
+    struct csched_vcpu *speer;
+    struct list_head *iter;
+    struct vcpu *vc;
+
+    /*
+     * Don't steal from an idle CPU's runq because it's about to
+     * pick up work from it itself.
+     */
+    if ( peer_pcpu != NULL && !is_idle_vcpu(peer_vcpu) )
+    {
+        list_for_each( iter, &peer_pcpu->runq )
+        {
+            speer = __runq_elem(iter);
+
+
+#if defined(NEW_LOAD_BALANCE) || defined(NEW_LOAD_BALANCE_SIMPLE)
+        if ( speer->pri < pri )
+		break;
+	if ( speer->pri == CSCHED_PRI_IDLE)
+		break;
+
+#ifdef NEW_LOAD_BALANCE222
+#ifdef NEW_LOAD_BALANCE_CACHE
+	if ( !is_idle_vcpu(speer->vcpu) && speer->laxity && (cpu2cache[peer_cpu]!=cpu2cache[cpu]))
+		continue;
+#else
+	if ( !is_idle_vcpu(speer->vcpu) && speer->laxity)
+		continue;
+#endif
+#endif
+        if ( speer->pri == pri) {
+ 		if ( !is_idle_vcpu(snext->vcpu) && snext->laxity)
+			break;
+		if ( (is_idle_vcpu(speer->vcpu) || !speer->laxity) && speer->last_time + NEW_LOAD_BALANCE_SIMPLE_DELAY > snext->last_time)
+			break;
+	}
+#else
+            /*
+             * If next available VCPU here is not of strictly higher
+             * priority than ours, this PCPU is useless to us.
+             */
+            if ( speer->pri <= pri )
+                break;
+#endif
+
+
+            /* Is this VCPU is runnable on our PCPU? */
+            vc = speer->vcpu;
+            BUG_ON( is_idle_vcpu(vc) );
+
+            if (__csched_vcpu_is_migrateable(vc, cpu))
+            {
+                /* We got a candidate. Grab it! */
+                CSCHED_VCPU_STAT_CRANK(speer, migrate_q);
+                CSCHED_STAT_CRANK(migrate_queued);
+                __runq_remove(speer);
+                vc->processor = cpu;
+                return speer;
+            }
+        }
+    }
+
+    CSCHED_STAT_CRANK(steal_peer_idle);
+    return NULL;
+}
+
+#ifdef NEW_LOAD_BALANCE_CACHE
+void csched_miss_event(struct vcpu *vcpu)
+{
+	CSCHED_VCPU(vcpu)->misses++;
+}
+#endif
+#ifdef NEW_LOAD_BALANCE
+#if 0
+static int
+csched_rtload_balance(int cpu)
+{
+	struct csched_pcpu * const spc = CSCHED_PCPU(cpu);
+	struct csched_vcpu *speer = spc->steal_me;
+	int peer_cpu = speer->vcpu->processor;
+	struct vcpu *vc;
+	int ret = 0;
+
+	if (speer==NULL || speer->vcpu->is_running)
+		return 0;
+
+	if ( !spin_trylock(&per_cpu(schedule_data, peer_cpu).schedule_lock) )
+        {
+            return 0;
+        }
+
+	if (spc->steal_me == NULL)
+		goto done;
+	if (!__vcpu_on_runq(speer)) {
+//		spc->steal_me = NULL;
+		goto done;
+	}
+
+            /* Is this VCPU is runnable on our PCPU? */
+            vc = speer->vcpu;
+            BUG_ON( is_idle_vcpu(vc) );
+	if (peer_cpu != vc->processor)
+		goto done;
+	if (peer_cpu == cpu)
+		goto done;
+
+            if (__csched_vcpu_is_migrateable(vc, cpu))
+            {
+                __runq_remove(speer);
+                vc->processor = cpu;
+                ret = 1;
+            }
+
+done:
+        spin_unlock(&per_cpu(schedule_data, peer_cpu).schedule_lock);
+	return ret;
+}
+#endif
+#endif
+
+static struct csched_vcpu *
+csched_load_balance(int cpu, struct csched_vcpu *snext)
+{
+    struct csched_vcpu *speer;
+    cpumask_t workers;
+    int peer_cpu;
+
+    BUG_ON( cpu != snext->vcpu->processor );
+
+    if ( snext->pri == CSCHED_PRI_IDLE )
+        CSCHED_STAT_CRANK(load_balance_idle);
+    else if ( snext->pri == CSCHED_PRI_TS_OVER )
+        CSCHED_STAT_CRANK(load_balance_over);
+    else
+        CSCHED_STAT_CRANK(load_balance_other);
+
+    /*
+     * Peek at non-idling CPUs in the system, starting with our
+     * immediate neighbour.
+     */
+    cpus_andnot(workers, cpu_online_map, csched_priv.idlers);
+    cpu_clear(cpu, workers);
+    peer_cpu = cpu;
+
+    while ( !cpus_empty(workers) )
+    {
+        peer_cpu = __cycle_cpu(peer_cpu, &workers);
+        cpu_clear(peer_cpu, workers);
+
+        /*
+         * Get ahold of the scheduler lock for this peer CPU.
+         *
+         * Note: We don't spin on this lock but simply try it. Spinning could
+         * cause a deadlock if the peer CPU is also load balancing and trying
+         * to lock this CPU.
+         */
+        if ( !spin_trylock(&per_cpu(schedule_data, peer_cpu).schedule_lock) )
+        {
+            CSCHED_STAT_CRANK(steal_trylock_failed);
+            continue;
+        }
+
+        /*
+         * Any work over there to steal?
+         */
+#if defined(NEW_LOAD_BALANCE) || defined(NEW_LOAD_BALANCE_SIMPLE)
+        speer = csched_runq_steal(peer_cpu, cpu, snext);
+#else
+        speer = csched_runq_steal(peer_cpu, cpu, snext->pri);
+#endif
+        spin_unlock(&per_cpu(schedule_data, peer_cpu).schedule_lock);
+        if ( speer != NULL ) {
+#ifdef WAIT_TIME_MEASURE
+	    speer->migrate_count++;
+#endif
+            return speer;
+	}
+    }
+
+    /* Failed to find more important work elsewhere... */
+    __runq_remove(snext);
+    return snext;
+}
+
+/*
+ * This function is in the critical path. It is designed to be simple and
+ * fast for the common case.
+ */
+static struct task_slice
+csched_schedule(s_time_t now)
+{
+    const int cpu = smp_processor_id();
+    struct list_head * const runq = RUNQ(cpu);
+#ifdef ACCURATE_ACCT
+    struct csched_pcpu * const spc = CSCHED_PCPU(cpu);
+    s_time_t passed = now - spc->start_time;
+    int consumed;
+#else
+#ifdef WAIT_TIME_MEASURE
+    struct csched_pcpu * const spc = CSCHED_PCPU(cpu);
+    s_time_t passed = now - spc->start_time;
+#endif
+#endif
+    struct csched_vcpu * const scurr = CSCHED_VCPU(current);
+    struct csched_vcpu *snext;
+    struct task_slice ret;
+
+    CSCHED_STAT_CRANK(schedule);
+    CSCHED_VCPU_CHECK(current);
+
+#ifdef ACCURATE_ACCT
+    /*
+     * Update credit
+     */
+    if ( !is_idle_vcpu(current) ) {
+        consumed = ( passed +
+                     (MILLISECS(CSCHED_MSECS_PER_TSLICE) /
+                      CSCHED_CREDITS_PER_TSLICE - 1)
+                   ) /
+                   ( MILLISECS(CSCHED_MSECS_PER_TSLICE) /
+                     CSCHED_CREDITS_PER_TSLICE );
+#ifdef BOOST_CREDIT
+    if ( scurr->pri == CSCHED_PRI_TS_BOOST )
+    {
+        int boost_credit = atomic_read(&scurr->boost_credit);
+
+        if ( boost_credit > consumed )
+        {
+            atomic_sub(consumed, &scurr->boost_credit);
+            consumed = 0;
+        }
+        else
+        {
+            atomic_sub(boost_credit, &scurr->boost_credit);
+            consumed -= boost_credit;
+            scurr->pri = CSCHED_PRI_TS_UNDER;
+        }
+    }
+#endif
+	if (consumed > 0)
+        	atomic_sub(consumed, &scurr->credit);
+    }
+#endif
+
+#ifdef WAIT_TIME_MEASURE
+    if ( !is_idle_vcpu(current) ) {
+	if (scurr->pri == CSCHED_PRI_TS_BOOST) {
+		scurr->passed_boost += passed;
+	} else if (scurr->pri == CSCHED_PRI_TS_UNDER) {
+		scurr->passed_under += passed;
+	} else {
+		scurr->passed_over += passed;
+	}
+	if (passed == 0)
+		printk("BUG! passed = 0?\n");
+#ifdef NEW_LOAD_BALANCE
+	scurr->usage += passed;
+#endif
+#ifdef LAXITY
+	scurr->last_passed = passed;
+#endif
+    }
+#endif
+
+    if ( scurr->pri == CSCHED_PRI_TS_BOOST )
+        scurr->pri = CSCHED_PRI_TS_UNDER;
+
+    /*
+     * Select next runnable local VCPU (ie top of local runq)
+     */
+    if ( vcpu_runnable(current) )
+        __runq_insert(cpu, scurr);
+    else
+        BUG_ON( is_idle_vcpu(current) || list_empty(runq) );
+
+    snext = __runq_elem(runq->next);
+
+    /*
+     * SMP Load balance:
+     *
+     * If the next highest priority local runnable VCPU has already eaten
+     * through its credits, look on other PCPUs to see if we have more
+     * urgent work... If not, csched_load_balance() will return snext, but
+     * already removed from the runq.
+     */
+#ifdef NEW_LOAD_BALANCE
+/*
+    if (spc->steal_me) {	// when we load-balance the given rt vcpu
+	if (csched_rtload_balance(cpu)) {
+		snext = spc->steal_me;
+		spc->steal_me = NULL;
+		BUG_ON( !is_idle_vcpu(snext->vcpu) && snext->sdom->laxity );
+		    TRACE_3D(TRC_CSCHED_VCPUINFO11, snext->vcpu->domain->domain_id, snext->vcpu->vcpu_id, cpu);
+	}
+    }*/
+    if ( snext->pri > CSCHED_PRI_TS_UNDER || (!is_idle_vcpu(snext->vcpu) && snext->laxity) )
+        __runq_remove(snext);
+    else
+        snext = csched_load_balance(cpu, snext);
+
+#else
+    if ( snext->pri > CSCHED_PRI_TS_OVER )
+        __runq_remove(snext);
+    else
+        snext = csched_load_balance(cpu, snext);
+#endif
+
+#ifdef WAIT_TIME_MEASURE
+    if (snext->last_time) {	// if not idle
+	    unsigned long wt = now - snext->last_time;
+	    if (now <= snext->last_time)	// sometimes time skew
+		wt = 1;		// just small value. 1ns
+
+	    if (snext->pri == CSCHED_PRI_TS_BOOST) {
+		if (snext->wt_worst_boost < wt)
+			snext->wt_worst_boost = wt;
+		snext->wt_count_boost++;
+		snext->wt_total_boost += wt;
+	    } else if (snext->pri == CSCHED_PRI_TS_UNDER) {
+		if (snext->wt_worst_under < wt)
+			snext->wt_worst_under = wt;
+		snext->wt_count_under++;
+		snext->wt_total_under += wt;
+	    } else {
+		if (snext->wt_worst_over < wt)
+			snext->wt_worst_over = wt;
+		snext->wt_count_over++;
+		snext->wt_total_over += wt;
+#ifdef DYNAMIC_WEIGHT
+		snext->count_over++;
+#endif
+	    }
+#ifdef LAXITY
+	    {
+	    long diff;
+	    diff = wt - snext->expected_wait_time;
+//	    if (wt <= snext->expected_wait_time)
+//		diff = 1;	// just small value. 1ns
+	    snext->wt_diff_expected += diff;
+	    }
+#endif
+    }
+#endif
+
+    /*
+     * Update idlers mask if necessary. When we're idling, other CPUs
+     * will tickle us when they get extra work.
+     */
+    if ( snext->pri == CSCHED_PRI_IDLE )
+    {
+        if ( !cpu_isset(cpu, csched_priv.idlers) )
+            cpu_set(cpu, csched_priv.idlers);
+    }
+    else if ( cpu_isset(cpu, csched_priv.idlers) )
+    {
+        cpu_clear(cpu, csched_priv.idlers);
+    }
+
+    /*
+     * Return task to run next...
+     */
+#ifdef BOOST_CREDIT
+    if ( snext->pri == CSCHED_PRI_TS_BOOST )
+    {
+        struct csched_vcpu * const svc = __runq_elem(runq->next);
+
+        if ( svc->pri == CSCHED_PRI_TS_BOOST )
+            ret.time = csched_priv.boost_tslice;
+        else
+            ret.time = MILLISECS(CSCHED_MSECS_PER_TICK);
+    }
+    else
+        ret.time = MILLISECS(CSCHED_MSECS_PER_TSLICE);
+#else
+#ifdef LAXITY
+    if ( snext->pri == CSCHED_PRI_TS_BOOST )
+       ret.time = MILLISECS(2);
+    else
+       ret.time = MILLISECS(CSCHED_MSECS_PER_TSLICE);
+#else
+    ret.time = MILLISECS(CSCHED_MSECS_PER_TSLICE);
+#endif
+#endif
+    ret.task = snext->vcpu;
+#ifdef BOOST_CREDIT
+    spc->time_slice  = ret.time;
+#endif
+#ifdef ACCURATE_ACCT
+    spc->start_time = now;
+#else
+#ifdef WAIT_TIME_MEASURE
+    spc->start_time = now;
+#endif
+#endif
+	count_vcpu_switch++;
+    CSCHED_VCPU_CHECK(ret.task);
+    return ret;
+}
+
+static void
+csched_dump_vcpu(struct csched_vcpu *svc)
+{
+    struct csched_dom * const sdom = svc->sdom;
+
+    printk("[%i.%i] pri=%i flags=%x cpu=%i",
+            svc->vcpu->domain->domain_id,
+            svc->vcpu->vcpu_id,
+            svc->pri,
+            svc->flags,
+            svc->vcpu->processor);
+
+    if ( sdom )
+    {
+#ifdef BOOST_CREDIT
+        printk(" credit=%i bc=%i [w=%u,bc=%i]",
+               atomic_read(&svc->credit),
+               atomic_read(&svc->boost_credit),
+               sdom->weight,
+               (sdom->boost_ratio * CSCHED_CREDITS_PER_TSLICE)/100);
+#else
+        printk(" credit=%i lax=%i [w=%u]", atomic_read(&svc->credit), svc->laxity, sdom->weight);
+#endif
+#ifdef CSCHED_STATS
+        printk(" (%d+%u) {a/i=%u/%u m=%u+%u}",
+                svc->stats.credit_last,
+                svc->stats.credit_incr,
+                svc->stats.state_active,
+                svc->stats.state_idle,
+                svc->stats.migrate_q,
+                svc->stats.migrate_r);
+#endif
+    }
+
+    printk("\n");
+}
+
+static void
+csched_dump_pcpu(int cpu)
+{
+    struct list_head *runq, *iter;
+    struct csched_pcpu *spc;
+    struct csched_vcpu *svc;
+    int loop;
+
+    spc = CSCHED_PCPU(cpu);
+    runq = &spc->runq;
+
+    printk(" sort=%d, sibling=0x%lx, core=0x%lx\n",
+            spc->runq_sort_last,
+            cpu_sibling_map[cpu].bits[0],
+            cpu_core_map[cpu].bits[0]);
+
+    /* current VCPU */
+    svc = CSCHED_VCPU(per_cpu(schedule_data, cpu).curr);
+    if ( svc )
+    {
+        printk("\trun: ");
+        csched_dump_vcpu(svc);
+    }
+
+    loop = 0;
+    list_for_each( iter, runq )
+    {
+        svc = __runq_elem(iter);
+        if ( svc )
+        {
+            printk("\t%3d: ", ++loop);
+            csched_dump_vcpu(svc);
+        }
+    }
+}
+
+#ifdef WAIT_TIME_MEASURE
+static void
+csched_myrecord_sub(struct csched_vcpu *svc)
+{
+/*
+    printk("[%i.%i] pri=%i flags=%x cpu=%i",
+            svc->vcpu->domain->domain_id,
+            svc->vcpu->vcpu_id,
+            svc->pri,
+            svc->flags,
+            svc->vcpu->processor);
+
+    if ( sdom )
+    {
+        printk(" credit=%i bc=%i [w=%u,bc=%i]",
+               atomic_read(&svc->credit),
+               atomic_read(&svc->boost_credit),
+               sdom->weight,
+               (sdom->boost_ratio * CSCHED_CREDITS_PER_TSLICE)/100);
+    }
+*/
+	TRACE_5D(TRC_CSCHED_VCPUINFO1, svc->vcpu->domain->domain_id, svc->vcpu->vcpu_id, (svc->wt_worst_boost)/1000UL, svc->wt_total_boost/1000UL , svc->wt_count_boost);
+	TRACE_5D(TRC_CSCHED_VCPUINFO2, svc->vcpu->domain->domain_id, svc->vcpu->vcpu_id, (svc->wt_worst_under)/1000UL, svc->wt_total_under/1000UL , svc->wt_count_under);
+	TRACE_5D(TRC_CSCHED_VCPUINFO3, svc->vcpu->domain->domain_id, svc->vcpu->vcpu_id, (svc->wt_worst_over)/1000UL, svc->wt_total_over/1000UL , svc->wt_count_over);
+#ifdef LAXITY
+	if (svc->wt_diff_expected < 0)		// if negative, usertool recognize it overflowed big value
+		TRACE_5D(TRC_CSCHED_VCPUINFO4, svc->vcpu->domain->domain_id, svc->vcpu->vcpu_id, 1, (-svc->wt_diff_expected)/1000UL , svc->wt_count_boost+svc->wt_count_under+svc->wt_count_over);
+	else
+		TRACE_5D(TRC_CSCHED_VCPUINFO4, svc->vcpu->domain->domain_id, svc->vcpu->vcpu_id, 0, svc->wt_diff_expected/1000UL , svc->wt_count_boost+svc->wt_count_under+svc->wt_count_over);
+	TRACE_3D(TRC_CSCHED_VCPUINFO8, svc->vcpu->domain->domain_id, svc->vcpu->vcpu_id, svc->laxity_count);
+#endif
+	TRACE_4D(TRC_CSCHED_VCPUINFO5, svc->vcpu->domain->domain_id, svc->vcpu->vcpu_id, svc->migrate_count, svc->laxity);
+	TRACE_5D(TRC_CSCHED_VCPUINFO6, svc->vcpu->domain->domain_id, svc->vcpu->vcpu_id, (svc->passed_boost)/1000UL, svc->passed_under/1000UL , svc->passed_over/1000UL);
+#ifdef BOOST_WITH_EVENT
+	TRACE_3D(TRC_CSCHED_VCPUINFO12, svc->vcpu->domain->domain_id, svc->vcpu->vcpu_id, svc->boost_with_event);
+#endif
+	reset_measurement(svc);
+}
+
+static void
+csched_myrecord(void)
+{
+    struct vcpu *p;
+    struct domain      *d;
+    struct csched_vcpu *svc;
+    struct csched_dom *sdom;
+
+TRACE_4D(TRC_CSCHED_VCPUINFO7, boost_from_boost, boost_from_under, boost_from_over, boost_from_idle);
+TRACE_3D(TRC_CSCHED_VCPUINFO14, count_task_switch, count_vcpu_switch, count_boundary_switch);
+    rcu_read_lock(&domlist_read_lock);
+    for_each_domain( d )
+    {
+	sdom = CSCHED_DOM(d);
+	TRACE_3D(TRC_CSCHED_VCPUINFO13, d->domain_id, sdom->weight, sdom->cap);
+        for_each_vcpu( d, p )
+        {
+		svc = (struct csched_vcpu *)p->sched_priv;
+		if (svc) {
+            		csched_myrecord_sub(svc);
+		}
+        }
+    }
+    rcu_read_unlock(&domlist_read_lock);
+}
+#endif
+
+
+static void
+csched_dump(void)
+{
+    struct list_head *iter_sdom, *iter_svc;
+    int loop;
+
+    printk("info:\n"
+           "\tncpus              = %u\n"
+           "\tmaster             = %u\n"
+           "\tcredit             = %u\n"
+           "\tcredit balance     = %d\n"
+           "\tweight             = %u\n"
+           "\trunq_sort          = %u\n"
+#ifdef BOOST_CREDIT
+           "\tboost_credit       = %u\n"
+           "\ttotal_boost_ratio  = %u\n"
+#endif
+           "\tdefault-weight     = %d\n"
+           "\tmsecs per tick     = %dms\n"
+           "\tcredits per tick   = %d\n"
+           "\tticks per tslice   = %d\n"
+           "\tticks per acct     = %d\n",
+           csched_priv.ncpus,
+           csched_priv.master,
+           csched_priv.credit,
+           csched_priv.credit_balance,
+           csched_priv.weight,
+           csched_priv.runq_sort,
+#ifdef BOOST_CREDIT
+           csched_priv.boost_credit,
+           csched_priv.total_boost_ratio,
+#endif
+           CSCHED_DEFAULT_WEIGHT,
+           CSCHED_MSECS_PER_TICK,
+           CSCHED_CREDITS_PER_TICK,
+           CSCHED_TICKS_PER_TSLICE,
+           CSCHED_TICKS_PER_ACCT);
+
+    printk("idlers: 0x%lx\n", csched_priv.idlers.bits[0]);
+
+    CSCHED_STATS_PRINTK();
+
+    printk("active vcpus:\n");
+    loop = 0;
+    list_for_each( iter_sdom, &csched_priv.active_sdom )
+    {
+        struct csched_dom *sdom;
+        sdom = list_entry(iter_sdom, struct csched_dom, active_sdom_elem);
+
+        list_for_each( iter_svc, &sdom->active_vcpu )
+        {
+            struct csched_vcpu *svc;
+            svc = list_entry(iter_svc, struct csched_vcpu, active_vcpu_elem);
+
+            printk("\t%3d: ", ++loop);
+            csched_dump_vcpu(svc);
+        }
+    }
+#ifdef HANDLING_CREDIT_OVER
+    printk("inactive vcpus:\n");
+    loop = 0;
+    list_for_each( iter_svc, &csched_priv.inactive_vcpu )
+    {
+        struct csched_vcpu *svc;
+        svc = list_entry(iter_svc, struct csched_vcpu, inactive_vcpu_elem);
+
+        printk("\t%3d: ", ++loop);
+        csched_dump_vcpu(svc);
+    }
+#endif
+}
+
+static void
+csched_init(void)
+{
+    spin_lock_init(&csched_priv.lock);
+    INIT_LIST_HEAD(&csched_priv.active_sdom);
+#ifdef HANDLING_CREDIT_OVER
+    INIT_LIST_HEAD(&csched_priv.inactive_vcpu);
+#endif
+    csched_priv.ncpus = 0;
+    csched_priv.master = UINT_MAX;
+    cpus_clear(csched_priv.idlers);
+    csched_priv.weight = 0U;
+    csched_priv.credit = 0U;
+    csched_priv.credit_balance = 0;
+    csched_priv.runq_sort = 0U;
+#ifdef BOOST_CREDIT
+    csched_priv.boost_credit = 0;
+    csched_priv.total_boost_ratio = 0;
+    csched_priv.boost_tslice = MILLISECS(opt_credit_tslice);
+#endif
+#ifdef NEW_LOAD_BALANCE_CACHE
+#ifdef SHARED_CACHE
+	cpu2cache[0] = 0;
+	cpu2cache[1] = 1;
+	cpu2cache[2] = 0;
+	cpu2cache[3] = 1;
+	cpus_clear(cache2cpumask[0]);
+	cpus_clear(cache2cpumask[1]);
+	cpu_set(0, cache2cpumask[0]);
+	cpu_set(2, cache2cpumask[0]);
+	cpu_set(1, cache2cpumask[1]);
+	cpu_set(3, cache2cpumask[1]);
+	cpu2cachecpu[0] = 0;
+	cpu2cachecpu[1] = 1;
+	cpu2cachecpu[2] = 0;
+	cpu2cachecpu[3] = 1;
+#else
+	cpu2cache[0] = 0;
+	cpu2cache[1] = 1;
+	cpu2cache[2] = 2;
+	cpu2cache[3] = 3;
+	cpus_clear(cache2cpumask[0]);
+	cpus_clear(cache2cpumask[1]);
+	cpus_clear(cache2cpumask[2]);
+	cpus_clear(cache2cpumask[3]);
+	cpu_set(0, cache2cpumask[0]);
+	cpu_set(1, cache2cpumask[1]);
+	cpu_set(2, cache2cpumask[2]);
+	cpu_set(3, cache2cpumask[3]);
+	cpu2cachecpu[0] = 0;
+	cpu2cachecpu[1] = 1;
+	cpu2cachecpu[2] = 2;
+	cpu2cachecpu[3] = 3;
+#endif
+#endif
+    CSCHED_STATS_RESET();
+
+    printk("DEFINES => [");
+#ifdef ACCURATE_ACCT
+    printk("ACCURATE_ACCT, ");
+#endif
+#ifdef BALANCE_CREDIT
+    printk("BALANCE_CREDIT, ");
+#endif
+#ifdef HANDLING_CREDIT_OVER
+    printk("HANDLING_CREDIT_OVER, ");
+#endif
+#ifdef BOOST_CREDIT
+    printk("BOOST_CREDIT, ");
+#endif
+#ifdef LAXITY
+#ifndef ONLY_BOOST_WITH_EVENT
+    printk("LAXITY, ");
+#endif
+#endif
+#ifdef BOOST_WITH_EVENT
+    printk("BOOST_WITH_EVENT, ");
+#endif
+#ifdef NEW_LOAD_BALANCE_SIMPLE
+    printk("NEW_LOAD_BALANCE_SIMPLE, ");
+#endif
+#ifdef NEW_LOAD_BALANCE
+    printk("NEW_LOAD_BALANCE, ");
+#endif
+#ifdef NEW_LOAD_BALANCE_CACHE
+    printk("NEW_LOAD_BALANCE_CACHE, ");
+#endif
+#ifdef WAIT_TIME_MEASURE
+    printk("WAIT_TIME_MEASURE, ");
+#endif
+    printk("] [");
+#ifdef RT_A
+    printk("RT_A ");
+#endif
+#ifdef RT_B
+    printk("RT_B ");
+#endif
+#ifdef RT_AB
+    printk("RT_AB ");
+#endif
+#ifdef RT_AL
+    printk("RT_AL");
+#endif
+#ifdef RT_ALL
+    printk("RT_ALL");
+#endif
+#ifdef RT_ABL
+    printk("RT_ABL");
+#endif
+#ifdef RT_ABLL
+    printk("RT_ABLL");
+#endif
+#ifdef RT_ACLL
+    printk("RT_ACLL");
+#endif
+#ifdef RT_ABCLL
+    printk("RT_ABCLL");
+#endif
+#ifdef DYNAMIC_WEIGHT
+    printk(",DYNAMIC_WEIGHT");
+#endif
+#ifdef DYNAMIC_WEIGHT_INFINITE
+    printk(",DYNAMIC_WEIGHT_INFINITE");
+#endif
+    printk(",DELAY=%ldns, ver %d]\n", NEW_LOAD_BALANCE_SIMPLE_DELAY, RT_VER );
+}
+
+/* Tickers cannot be kicked until SMP subsystem is alive. */
+static __init int csched_start_tickers(void)
+{
+    struct csched_pcpu *spc;
+    unsigned int cpu;
+
+    /* Is the credit scheduler initialised? */
+    if ( csched_priv.ncpus == 0 )
+        return 0;
+
+    for_each_online_cpu ( cpu )
+    {
+        spc = CSCHED_PCPU(cpu);
+        set_timer(&spc->ticker, NOW() + MILLISECS(CSCHED_MSECS_PER_TICK));
+    }
+
+    return 0;
+}
+__initcall(csched_start_tickers);
+
+
+struct scheduler sched_credit_def = {
+    .name           = "SMP Credit Scheduler",
+    .opt_name       = "credit",
+    .sched_id       = XEN_SCHEDULER_CREDIT,
+
+    .init_domain    = csched_dom_init,
+    .destroy_domain = csched_dom_destroy,
+
+    .init_vcpu      = csched_vcpu_init,
+    .destroy_vcpu   = csched_vcpu_destroy,
+
+    .sleep          = csched_vcpu_sleep,
+    .wake           = csched_vcpu_wake,
+
+    .adjust         = csched_dom_cntl,
+
+    .pick_cpu       = csched_cpu_pick,
+    .do_schedule    = csched_schedule,
+
+    .dump_cpu_state = csched_dump_pcpu,
+    .dump_settings  = csched_dump,
+    .init           = csched_init,
+};
