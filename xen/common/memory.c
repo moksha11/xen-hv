@@ -156,13 +156,13 @@ static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memo
 
             mfn = page_to_mfn(page);
             guest_physmap_add_page(d, gpfn, mfn, a->extent_order);
-
+#ifdef HETERODEBUG
 			if(d && d->domain_id >= 1){
 				printk(KERN_DEBUG "populate_physmap: added page to guest gpfn:  %lu "
 								  "mfn: %u, extent_order: %u\n ",
 								  (unsigned int)gpfn, (unsigned int)mfn, a->extent_order);
 			}
-
+#endif
 
             if ( !paging_mode_translate(d) )
             {
@@ -172,13 +172,13 @@ static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memo
                 /* Inform the domain of the new page's machine address. */ 
                 if ( unlikely(__copy_to_guest_offset(a->extent_list, i, &mfn, 1)) )
                     goto out;
-
+#ifdef HETERODEBUG
 				/*if(d && d->domain_id == 1){
 					printk(KERN_DEBUG "copy page to extent list:  %lu "
 								  "mfn: %u, extent_order: %u\n ",
 								  (unsigned int)gpfn + j, (unsigned int)mfn + j, a->extent_order);
 				}*/
-
+#endif
             }
         }
     }

@@ -1,0 +1,110 @@
+46,47d45
+< static int heterodebug;
+< 
+288a287
+> 
+311,333d309
+< 	if(!heterodebug){
+< 
+< 		if(d && d->domain_id >= 1) {
+< 
+< 			unsigned int temp_node = first_node(nodemask);
+< 
+< 			while ( temp_node < MAX_NUMNODES ){
+< 
+< 				printk( "alloc_heap_pages failed at nodemask_retry++ \n");
+< 				zone = zone_hi;
+< 				do {
+< 					/* Check if target node can support the allocation. */
+< 					if (avail && avail[temp_node] )
+< 						printk("FIRST TIME INTIT STATE avail[%u][%u]: %lu, request: %lu "
+< 								"total_free_pages() %lu \n",
+< 								temp_node,zone,request, total_free_pages());
+< 				} while ( zone-- > zone_lo ); /* careful: unsigned zone may wrap */
+< 				temp_node =  next_node(temp_node, nodemask);
+< 			}
+< 		}
+< 		heterodebug = 1;	
+< 	}
+< 
+356a333
+> 
+357a335
+> 
+366,369c344
+<          tmem_freeable_pages() ) {
+< 	
+< 		if(d && d->domain_id >= 1)	
+< 		printk( "page_alloc: opt_tmem is set, total_avail_pages <= midsize_alloc_zone_pages \n");
+---
+>          tmem_freeable_pages() )
+371d345
+< 	}
+390,394d363
+< 
+< 			if(d && d->domain_id > 0){
+< 				printk("avail[%u][%u]: %u, request: %u \n",node,zone,request);
+< 			}
+< 
+397,398c366
+<         if ( memflags & MEMF_exact_node ){
+< 	    	printk( "alloc_heap_pages failed at memflags & MEMF_exact_node \n");	    
+---
+>         if ( memflags & MEMF_exact_node )
+400d367
+< 		}
+416,435c383
+<             if ( nodemask_retry++ ) {
+< 
+< 				if(d && d->domain_id >= 1) {
+< 
+< 				 	unsigned int temp_node = first_node(nodemask);
+< 
+< 				 	while ( temp_node < MAX_NUMNODES ){
+< 
+< 						printk( "alloc_heap_pages failed at nodemask_retry++ \n");
+< 						zone = zone_hi;
+< 				   		do {
+< 							/* Check if target node can support the allocation. */
+< 							if (avail && avail[temp_node] )
+< 								printk("avail[%u][%u]: %lu, request: %lu "
+< 										"total_free_pages() %lu \n",
+< 										temp_node,zone,request, total_free_pages());
+< 						} while ( zone-- > zone_lo ); /* careful: unsigned zone may wrap */
+< 						temp_node =  next_node(temp_node, nodemask);
+< 					}
+< 				}
+---
+>             if ( nodemask_retry++ )
+437d384
+< 			}
+440,445c387,388
+< 			/*if(d && d->domain_id >= 1) {
+<             	if ( node >= MAX_NUMNODES ){
+< 					printk( "alloc_heap_pages failed at node >= MAX_NUMNODES \n");
+<                 	goto not_found;
+< 				}
+< 			}*/
+---
+>             if ( node >= MAX_NUMNODES )
+>                 goto not_found;
+932a876
+> 
+940a885
+> 
+952a898
+> 
+1260,1264c1206
+<                                   memflags, d)) == NULL)) ){
+< 
+< 	  if(d && d->domain_id >= 1)
+<           printk("Fails after alloc_heap_pages \n");
+< 
+---
+>                                   memflags, d)) == NULL)) )
+1266d1207
+< 	}
+1270,1272d1210
+< 		if(d && d->domain_id >= 1)
+< 			printk("Fails after assign pages \n");
+< 

@@ -1,0 +1,1 @@
+/home/sudarsun/xen-hv/tools/ioemu-qemu-xen/tests/cris/.gdbinit
