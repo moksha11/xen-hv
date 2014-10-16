@@ -38,6 +38,7 @@
 #define XENMEM_decrease_reservation 1
 #define XENMEM_populate_physmap     6
 #define XENMEM_hetero_populate_physmap     7
+#define XENMEM_hetero_stop_hotpage_scan 5
 
 
 #if __XEN_INTERFACE_VERSION__ >= 0x00030209

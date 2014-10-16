@@ -4,5 +4,5 @@ TARGET_ARCH=ppc64
 TARGET_ABI_DIR=ppc
 TARGET_WORDS_BIGENDIAN=yes
 CONFIG_SOFTMMU=yes
-TARGET_XML_FILES= /home/sudarsun/xen-hv/tools/ioemu-qemu-xen/gdb-xml/power64-core.xml /home/sudarsun/xen-hv/tools/ioemu-qemu-xen/gdb-xml/power-fpu.xml /home/sudarsun/xen-hv/tools/ioemu-qemu-xen/gdb-xml/power-altivec.xml /home/sudarsun/xen-hv/tools/ioemu-qemu-xen/gdb-xml/power-spe.xml
+TARGET_XML_FILES= /usr/src/xen-hv/tools/ioemu-qemu-xen/gdb-xml/power64-core.xml /usr/src/xen-hv/tools/ioemu-qemu-xen/gdb-xml/power-fpu.xml /usr/src/xen-hv/tools/ioemu-qemu-xen/gdb-xml/power-altivec.xml /usr/src/xen-hv/tools/ioemu-qemu-xen/gdb-xml/power-spe.xml
 CONFIG_SOFTFLOAT=yes

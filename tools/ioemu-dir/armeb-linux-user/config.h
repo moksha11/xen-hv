@@ -8,4 +8,3 @@
 #define CONFIG_LINUX_USER 1
 #define CONFIG_SOFTFLOAT 1
 #define TARGET_HAS_BFLT 1
-#define USE_NPTL 1

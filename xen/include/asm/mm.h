@@ -159,6 +159,11 @@ struct page_info
 #if 1
 	struct frame_t frame;
 #endif
+
+#if 1
+	u16 list_add_flags;
+#endif
+
 };
 
 #undef __pdx_t

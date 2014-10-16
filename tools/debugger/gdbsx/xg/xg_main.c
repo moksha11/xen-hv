@@ -33,7 +33,7 @@
  *  XGERR(): generic print error utility
  *  XGTRC(): generic trace utility
  */
-
+#include <sys/types.h>
 #include <stdio.h>
 #include <stddef.h>
 #include <stdarg.h>

@@ -26,6 +26,9 @@
 #include <xen/heterovisor.h>
 #include <xen/guest_access.h>
 
+#define HETEROPERF
+
+
 /*
  * CSCHED_STATS
  *
@@ -2040,13 +2043,20 @@ csched_tick(void *_cpu)
 	        }
 	if(hetero_visor_mem){
 		if (MY_MASTER == cpu) {
+#ifdef HETEROPERF
+#else
 			pcpu_stat();
+#endif
 		}
 	}
 #endif
 	if(hetero_visor_mem){
 		if (MY_MASTER == cpu) {
-			heartbeat();
+#ifdef HETEROPERF
+#else
+		heartbeat();
+#endif
+
 		}
 	}
 	}
