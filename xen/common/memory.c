@@ -123,7 +123,18 @@ int hetero_chckskip_page(struct page_info *page, unsigned long curr){
 
 	return -1;
 }
- 
+
+int check_if_valid_domain_pg(unsigned int mfn) {
+
+	struct domain *vm = page_get_owner(__mfn_to_page(mfn));
+    if (vm) {
+        int vm_id = vm->domain_id;
+        if (vm_id>=0 && vm_id < MAX_HETERO_VM && (vm_id%2==0)) {
+			return 0;
+		}
+	}
+	return -1;
+ }
 
 int add_hotpage_tolist(struct page_info *page, unsigned int mfn) {
 
@@ -132,6 +143,10 @@ int add_hotpage_tolist(struct page_info *page, unsigned int mfn) {
 
 	if(atomic_read(&disabl_shrink_hotpg))
         return 0;
+	
+	//failure if return is > 0
+	if(check_if_valid_domain_pg(mfn))
+		return 0;
 
 	if(!hotmfns){
 
@@ -144,10 +159,10 @@ int add_hotpage_tolist(struct page_info *page, unsigned int mfn) {
 	idx = 0;
  	if(hotmfns){
 		 idx = pages_added % MAX_HOT_MFNS;
-		 if(hotmfns[idx] == 0) {
+		 //if(hotmfns[idx] == 0) {
 			 hotmfns[idx] = mfn; 	
 			 pages_added++;
-		}	
+		//}	
     }
 	return 0;
 }

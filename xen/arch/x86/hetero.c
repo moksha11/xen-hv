@@ -174,8 +174,7 @@ static int hetero(unsigned int mfn, int add /* 1 for add, 0 for del */)
 #else
 		FTABLE_HETERO(mfn) = mfn;	
 #endif
-
-		add_hotpage_tolist(NULL,mfn);
+		//add_hotpage_tolist(NULL,mfn);
 
 	} else {
 		new_mfn = mfn;
@@ -222,6 +221,7 @@ static int hetero(unsigned int mfn, int add /* 1 for add, 0 for del */)
 			myprintk("WARN dec null owner..mfn:%lx\n", mfn);
 		}
 
+		//add_hotpage_tolist(NULL,mfn);
 		//FTABLE_HETERO(mfn) = 0;
 #if 0
 		void *p;
@@ -243,6 +243,10 @@ static int hetero(unsigned int mfn, int add /* 1 for add, 0 for del */)
 #define MAX_TEMP_MFNS	1024
 #define TIME_WINDOW	3000	// in millisec
 // vr->lock is held when called.
+
+
+
+#if 0
 static int scan_hot_pages(s_time_t now, struct vregion_t *vr, unsigned int *mfns, char *flag, int *migrate)
 {
 #ifdef DEBUG_ASSERT
@@ -272,14 +276,13 @@ static int scan_hot_pages(s_time_t now, struct vregion_t *vr, unsigned int *mfns
 	if (time + MILLISECS(TIME_WINDOW) < now) {
 		flag[ret] = 0;
 		mfns[ret++] = cur;
-		//add_hotpage_tolist(NULL,cur);
-
 #ifdef ENABLE_HETERO
 		if (FTABLE_HETERO(cur)) {
 			*migrate = 1;
 		  //unsigned long mymfn = (unsigned long)FTABLE_HETERO(cur);
 		  //unsigned int  intmfn = FTABLE_HETERO(cur);
 		  //printk("ULONG MFN %lu, UINMFN %u \n",mymfn, intmfn); 				
+		  //add_hotpage_tolist(NULL,cur);
 		}
 #endif
 	}
@@ -292,7 +295,7 @@ static int scan_hot_pages(s_time_t now, struct vregion_t *vr, unsigned int *mfns
 			flag[ret] = 1;
 			mfns[ret++] = cur;
 			*migrate = 1;
-			//add_hotpage_tolist(NULL,cur);
+			add_hotpage_tolist(NULL,cur);
 		  	//unsigned long mymfn = (unsigned long)FTABLE_HETERO(cur);
           	//unsigned int  intmfn = FTABLE_HETERO(cur);
           	//printk("ULONG MFN %lu, UINMFN %u \n",mymfn, intmfn);
@@ -309,7 +312,7 @@ static int scan_hot_pages(s_time_t now, struct vregion_t *vr, unsigned int *mfns
   				//unsigned long mymfn = (unsigned long)FTABLE_HETERO(cur);
           		//unsigned int  intmfn = FTABLE_HETERO(cur);
           		//printk("ULONG MFN %lu, UINMFN %u \n",mymfn, intmfn);
-				//add_hotpage_tolist(NULL,cur);
+				add_hotpage_tolist(NULL,cur);
 			}
 #endif
 		}
@@ -325,20 +328,85 @@ static int scan_hot_pages(s_time_t now, struct vregion_t *vr, unsigned int *mfns
 //		myprintk("%d hot pages scanned, mig=%d\n", frame_count, *migrate);
 	return ret;
 }
+#endif
+
+
+
+
+static int scan_hot_pages(s_time_t now, struct vregion_t *vr, unsigned int *mfns, char *flag, int *migrate)
+{
+#ifdef DEBUG_ASSERT
+	if (!spin_is_locked(&vr->lock))
+		mypanic("scan_hot_pages:grep vr->lock first!");
+#endif
+	int frame_count = 0;
+	*migrate = 0;
+	if (vr->head == -1)
+		return 0;
+	int start = FTABLE_PREV(vr->head);	// reverse looping
+	int cur = start;
+
+	s_time_t time;
+	int ret = 0;
+#define HETERO_PAGE_VM_LIMITS
+#ifdef HETERO_PAGE_VM_LIMITS
+	int within_limit;
+#endif
+	do {
+	frame_count++;
+	time = ((unsigned long)FTABLE_TIME(cur) << 20);
+	within_limit = less_than_limit(cur);
+	// TODO: refcnt?
+	if (time + MILLISECS(TIME_WINDOW) < now) {
+		flag[ret] = 0;
+		mfns[ret++] = cur;
+		if (FTABLE_HETERO(cur)) {
+			*migrate = 1;
+			FTABLE_HETERO(cur)=0;
+		    add_hotpage_tolist(NULL,cur);
+		}
+	}
+	else {
+		if (!FTABLE_HETERO(cur)) {
+			if (within_limit == 1) {
+			flag[ret] = 1;
+			mfns[ret++] = cur;
+			*migrate = 1;
+			add_hotpage_tolist(NULL,cur);
+			}
+		} else {
+			if (within_limit == 0) {
+				flag[ret] = 0;
+				mfns[ret++] = cur;
+				*migrate = 1;
+				if(FTABLE_HETERO(cur))
+				FTABLE_HETERO(cur)=0;
+				add_hotpage_tolist(NULL,cur);
+			}
+		}
+	}
+	cur = FTABLE_PREV(cur);	// reverse looping
+	if (ret >= MAX_TEMP_MFNS || frame_count >= MAX_SCAN) {	// note that clear_abit() keeps adding to list..
+		vr->head = cur;	// set head
+		break;
+	}
+	} while(cur != start);
+	return ret;
+}
+
+
 
 DEFINE_PER_CPU(unsigned int [MAX_TEMP_MFNS], mfns_from_hot_list);
 DEFINE_PER_CPU(char [MAX_TEMP_MFNS], flag_from_hot_list);
 
-void shrink_hot_pages_orig(s_time_t now)
+void shrink_hot_pages(s_time_t now)
 {
 	unsigned int *mfns = per_cpu(mfns_from_hot_list, smp_processor_id());
 	char *flag = per_cpu(flag_from_hot_list, smp_processor_id());
-//	unsigned int (*mfns)[MAX_TEMP_MFNS] = &(per_cpu(mfns_from_hot_list, smp_processor_id()));
-//	char (*flag)[MAX_TEMP_MFNS] = &(per_cpu(flag_from_hot_list, smp_processor_id()));
 	int i, ret, migrate;
 
-	//if(atomic_read(&disabl_shrink_hotpg))
-	//	return;
+	if(atomic_read(&disabl_shrink_hotpg))
+		return;
 
 #ifdef HETERO_PAGE_VM_LIMITS
 	for(i=0;i<MAX_HETERO_VM;i++) {
@@ -347,36 +415,33 @@ void shrink_hot_pages_orig(s_time_t now)
 #endif
 	myspin_lock(&seed_user_hot->lock, 29);
 	ret = scan_hot_pages(now, seed_user_hot, mfns, flag, &migrate);
-	migrate = 0;
+	//migrate = 0;
 #ifdef ENABLE_HETERO
 	if (migrate)	// true if any copy is necessary..
 	{
-
-	int copy_count = 0;
-	int rmap_count = 0;
-	for(i=0;i<ret;i++) {
-		if (!flag[i]) {
-			if (FTABLE_HETERO(mfns[i])) {
-				rmap_count += hetero(mfns[i], 0);
+		int copy_count = 0;
+		int rmap_count = 0;
+		for(i=0;i<ret;i++) {
+			if (!flag[i]) {
+				if (FTABLE_HETERO(mfns[i])) {
+					rmap_count += hetero(mfns[i], 0);
+					//add_hotpage_tolist(NULL,mfns[i]);
+					copy_count++;
+				}
+			} else {
+				MYASSERT(FTABLE_HETERO(mfns[i]) == 0);
+				rmap_count += hetero(mfns[i], 1);
 				//add_hotpage_tolist(NULL,mfns[i]);
 				copy_count++;
 			}
-		} else {
-			MYASSERT(FTABLE_HETERO(mfns[i]) == 0);
-			rmap_count += hetero(mfns[i], 1);
-			//add_hotpage_tolist(NULL,mfns[i]);
-			copy_count++;
 		}
-	}
 
 	}
 #endif
-
 	spin_unlock(&seed_user_hot->lock);	// TODO determine where this goes..
 	for(i=0;i<ret;i++) {
 
-		//if(mfns[i])
-		//add_hotpage_tolist(NULL,mfns[i]);
+	add_hotpage_tolist(NULL,mfns[i]);	
 
 #ifdef ENABLE_HETERO
 		if (flag[i])
@@ -392,12 +457,11 @@ void shrink_hot_pages_orig(s_time_t now)
 		FTABLE_ABIT(mfns[i]) = 0;
 	}
 	//spin_unlock(&seed_user_hot->lock);	// TODO determine where this goes..
-
 }
 
 
 
-void shrink_hot_pages(s_time_t now)
+void shrink_hot_pages_orig(s_time_t now)
 {
 	unsigned int *mfns = per_cpu(mfns_from_hot_list, smp_processor_id());
 	char *flag = per_cpu(flag_from_hot_list, smp_processor_id());
