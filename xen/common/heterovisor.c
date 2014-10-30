@@ -53,3 +53,10 @@ long do_perfctr_op(int op, XEN_GUEST_HANDLE(void) arg)
 	read_perfctr(arg);
 	return 0;
 }
+
+long do_hypertest(int dummy)
+{
+	(void)dummy;
+	printk("calling do_hypertest\n");
+	return 0;
+}
