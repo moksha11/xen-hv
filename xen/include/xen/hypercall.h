@@ -146,8 +146,10 @@ do_alloc_hetero_op(
 	int pages);
 
 extern long
-do_hypertest(
-	int dummy);
+do_hsm_get_mfn(XEN_GUEST_HANDLE(uint64_t) mfn);
+
+extern long
+do_hsm_free_mfn(uint64_t mfn);
 
 extern int
 do_xenoprof_op(int op, XEN_GUEST_HANDLE(void) arg);
