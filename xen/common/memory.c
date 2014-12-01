@@ -129,7 +129,7 @@ int check_if_valid_domain_pg(unsigned int mfn) {
 	struct domain *vm = page_get_owner(__mfn_to_page(mfn));
     if (vm) {
         int vm_id = vm->domain_id;
-        if (vm_id>=0 && vm_id < MAX_HETERO_VM && (vm_id%2==0)) {
+        if (vm_id>=0 && vm_id < MAX_HETERO_VM) { //&& (vm_id%2 !=0)) {
 			return 0;
 		}
 	}
@@ -216,7 +216,14 @@ static void hetero_get_hotpage(struct memop_args *a, struct xen_hetero_memory_re
 out:
     /*set to 0 after the hypercall*/
     atomic_set(&disabl_shrink_hotpg, 0);
-    a->nr_done = i;
+
+	/*if( i > 4096) {
+		a->nr_done = 4096;
+	}
+	else*/ {
+		a->nr_done = i;
+	}
+
 	return 0;
 }
 
@@ -349,8 +356,8 @@ static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memo
 
 #ifdef ENABLE_MULTI_NODE
 			if(d && d->domain_id > 0){
-				page = alloc_domheap_pages(d, a->extent_order, (a->memflags | MEMF_node(SLOW_MEMORY_NODE) | MEMF_exact_node));
-				//printk(KERN_DEBUG "hetero_populate_physmap: allocating from memory node %u \n",SLOW_MEMORY_NODE);
+				page = alloc_domheap_pages(d, a->extent_order, (a->memflags | MEMF_node(FAST_MEMORY_NODE) | MEMF_exact_node));
+				//printk(KERN_DEBUG "hetero_populate_physmap: allocating from memory node %u \n",FAST_MEMORY_NODE);
 			}
 #else
             page = alloc_domheap_pages(d, a->extent_order, a->memflags);
