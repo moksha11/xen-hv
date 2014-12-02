@@ -5,4 +5,3 @@
 #define TARGET_CRIS 1
 #define CONFIG_USER_ONLY 1
 #define CONFIG_LINUX_USER 1
-#define USE_NPTL 1

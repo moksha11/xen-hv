@@ -17,6 +17,7 @@ include minios.mk
 
 # Set tester flags
 # CFLAGS += -DBLKTEST_WRITE
+CFLAGS += -Wno-error=format
 
 # Define some default flags for linking.
 LDLIBS := 

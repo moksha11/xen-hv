@@ -1,1 +1,1 @@
-/home/sudarsun/xen-hv/tools/../tools/ioemu-qemu-xen/xen-config.mak
+/usr/src/xen-hv/tools/../tools/ioemu-qemu-xen/xen-config.mak

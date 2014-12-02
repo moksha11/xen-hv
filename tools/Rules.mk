@@ -42,7 +42,7 @@ endif
 
 X11_LDPATH = -L/usr/X11R6/$(LIBLEAFDIR)
 
-CFLAGS += -D__XEN_TOOLS__
+CFLAGS += -D__XEN_TOOLS__ -Wno-sizeof-pointer-memaccess
 
 # Get gcc to generate the dependencies for us.
 CFLAGS += -MMD -MF .$(@F).d
@@ -56,7 +56,7 @@ LDFLAGS += $(shell getconf LFS_LDFLAGS)
 endif
 
 # Xen tools build is currently incompatible with ld --as-needed
-LDFLAGS += -Wl,--no-as-needed
+LDFLAGS += -Wl,--no-as-needed -lrt
 
 # 32-bit x86 does not perform well with -ve segment accesses on Xen.
 CFLAGS-$(CONFIG_X86_32) += $(call cc-option,$(CC),-mno-tls-direct-seg-refs)

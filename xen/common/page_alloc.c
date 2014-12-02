@@ -43,7 +43,7 @@
 #include <asm/flushtlb.h>
 #include <asm/p2m.h>
 
-static int heterodebug=0;
+#define HETEROPERF
 
 /*
  * Comma-separated list of hexadecimal page numbers containing bad bytes.
@@ -286,6 +286,7 @@ static unsigned long init_node_heap(int node, unsigned long mfn,
         BUG_ON(!_heap[node] || !avail[node]);
         needed = 0;
     }
+
     memset(avail[node], 0, NR_ZONES * sizeof(long));
 
     for ( i = 0; i < NR_ZONES; i++ )
@@ -307,37 +308,6 @@ static struct page_info *alloc_heap_pages(
     cpumask_t extra_cpus_mask, mask;
     struct page_info *pg;
     nodemask_t nodemask = (d != NULL ) ? d->node_affinity : node_online_map;
-
-#ifdef HETERODEBUG
-	if(total_free_pages() % 1000) {
-		myprint_xenheap();
-		printk("total_free_pages() %lu \n",total_free_pages());
-	}
-#endif
-
-	if(!heterodebug){
-
-		if(d && d->domain_id >= 1) {
-
-			unsigned int temp_node = first_node(nodemask);
-
-			while ( temp_node < MAX_NUMNODES ){
-#ifdef HETERODEBUG
-				printk( "alloc_heap_pages failed at nodemask_retry++ \n");
-#endif
-				zone = zone_hi;
-				do {
-					/* Check if target node can support the allocation. */
-					if (avail && avail[temp_node] )
-						printk("FIRST TIME INTIT STATE avail[%u][%u]: %lu, request: %lu "
-								"total_free_pages() %lu \n",
-								temp_node,zone, avail[temp_node][zone], request, total_free_pages());
-				} while ( zone-- > zone_lo ); /* careful: unsigned zone may wrap */
-				temp_node =  next_node(temp_node, nodemask);
-			}
-		}
-		heterodebug = 1;	
-	}
 
     if ( node == NUMA_NO_NODE )
     {
@@ -362,7 +332,9 @@ static struct page_info *alloc_heap_pages(
 		printk("Fail due to large order%d > %d(MAX) \n", order, MAX_ORDER);
         return NULL;
 	}
+
     spin_lock(&heap_lock);
+
     /*
      * TMEM: When available memory is scarce due to tmem absorbing it, allow
      * only mid-size allocations to avoid worst of fragmentation issues.
@@ -371,12 +343,8 @@ static struct page_info *alloc_heap_pages(
      */
     if ( opt_tmem && ((order == 0) || (order >= 9)) &&
          (total_avail_pages <= midsize_alloc_zone_pages) &&
-         tmem_freeable_pages() ) {
-	
-		if(d && d->domain_id >= 1)	
-		printk( "page_alloc: opt_tmem is set, total_avail_pages <= midsize_alloc_zone_pages \n");
+         tmem_freeable_pages() )
         goto try_tmem;
-	}
 
     /*
      * Start with requested node, but exhaust all node memory in requested 
@@ -395,20 +363,10 @@ static struct page_info *alloc_heap_pages(
             for ( j = order; j <= MAX_ORDER; j++ )
                 if ( (pg = page_list_remove_head(&heap(node, zone, j))) )
                     goto found;
-#ifdef HETERODEBUG
-			if(d && d->domain_id > 0){
-				printk("avail[%u][%u]: %u, request: %u \n",node,zone,request);
-			}
-#endif
-
         } while ( zone-- > zone_lo ); /* careful: unsigned zone may wrap */
 
-        if ( memflags & MEMF_exact_node ){
-#ifdef HETERODEBUG
-	    	printk( "alloc_heap_pages failed at memflags & MEMF_exact_node \n");	    
-#endif
+        if ( memflags & MEMF_exact_node )
             goto not_found;
-		}
 
         /* Pick next node. */
         if ( !node_isset(node, nodemask) )
@@ -424,33 +382,12 @@ static struct page_info *alloc_heap_pages(
         if ( node == first_node )
         {
             /* When we have tried all in nodemask, we fall back to others. */
-            if ( nodemask_retry++ ) {
-#ifdef HETERODEBUG
-				if(d && d->domain_id >= 1) {
-					printk( "alloc_heap_pages failed at nodemask_retry++ \n");
-				    unsigned int temp_node = first_node(nodemask);
-				 	while ( temp_node < MAX_NUMNODES ){
-						zone = zone_hi;
-				   		do {
-							/* Check if target node can support the allocation. */
-							if (avail && avail[temp_node] )
-								printk("avail[%u][%u]: %lu, request: %lu "
-										"total_free_pages() %lu \n",
-										temp_node,zone,avail[temp_node][zone],request, total_free_pages());
-						} while ( zone-- > zone_lo ); /* careful: unsigned zone may wrap */
-						temp_node =  next_node(temp_node, nodemask);
-					}
-				}
-				if(d && d->domain_id >= 1)
-					printk("jumping to not_found \n");
-#endif
+            if ( nodemask_retry++ )
                 goto not_found;
-			}
             nodes_andnot(nodemask, node_online_map, nodemask);
             first_node = node = first_node(nodemask);
-            if ( node >= MAX_NUMNODES ){
+            if ( node >= MAX_NUMNODES )
                 goto not_found;
-			}
         }
     }
 
@@ -471,13 +408,11 @@ static struct page_info *alloc_heap_pages(
 void myprint_xenheap(void);
 		myprint_xenheap();
 void memleak_report(void);
+#ifdef HETEROPERF
+#else
 		memleak_report();
-	}
-#ifdef HETERODEBUG
-	if(d && d->domain_id >= 1)
-		printk("jumped to not_found, returning null \n");
 #endif
-
+	}
     return NULL;
 
  found: 
@@ -943,6 +878,7 @@ static void init_heap_pages(
     for ( i = 0; i < nr_pages; i++ )
     {
         unsigned int nid = phys_to_nid(page_to_maddr(pg+i));
+
         if ( unlikely(!avail[nid]) )
         {
             unsigned long s = page_to_mfn(pg + i);
@@ -951,6 +887,7 @@ static void init_heap_pages(
                               !(s & ((1UL << MAX_ORDER) - 1)) &&
                               (find_first_set_bit(e) <= find_first_set_bit(s));
             unsigned long n;
+
             n = init_node_heap(nid, page_to_mfn(pg+i), nr_pages - i,
                                &use_tail);
             BUG_ON(i + n > nr_pages);
@@ -963,6 +900,7 @@ static void init_heap_pages(
                 break;
             nr_pages -= n;
         }
+
         free_heap_pages(pg+i, 0);
     }
 }
@@ -1264,44 +1202,17 @@ struct page_info *alloc_domheap_pages(
     if ( (zone_hi = min_t(unsigned int, bits_to_zone(bits), zone_hi)) == 0 )
         return NULL;
 
-    if ( dma_bitsize && ((dma_zone = bits_to_zone(dma_bitsize)) < zone_hi) ) {
-
-#ifdef HETERODEBUG
-		if(d && d->domain_id >= 1){
-			printk("alloc_heap_pages calling alloc_heap using DMA\n");
-		}
-#endif
-
+    if ( dma_bitsize && ((dma_zone = bits_to_zone(dma_bitsize)) < zone_hi) )
         pg = alloc_heap_pages(dma_zone + 1, zone_hi, order, memflags, d);
-
-		if(pg == NULL) {
-#ifdef HETERODEBUG
-			if(d && d->domain_id >= 1){
-				printk("alloc_heap_pages after DMA failed\n");
-			}
-#endif
-		}
-	}
 
     if ( (pg == NULL) &&
          ((memflags & MEMF_no_dma) ||
           ((pg = alloc_heap_pages(MEMZONE_XEN + 1, zone_hi, order,
-                                  memflags, d)) == NULL)) ){
-
-#ifdef HETERODEBUG
-	  if(d && d->domain_id >= 1)
-          printk("Fails after alloc_heap_pages \n");
-#endif
-
+                                  memflags, d)) == NULL)) )
          return NULL;
-	}
 
     if ( (d != NULL) && assign_pages(d, pg, order, memflags) )
     {
-//#ifdef HETERODEBUG
-		if(d && d->domain_id >= 1)
-			printk("Fails after assign pages \n");
-//#endif
         free_heap_pages(pg, order);
         return NULL;
     }

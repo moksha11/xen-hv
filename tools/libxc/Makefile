@@ -67,7 +67,7 @@ OSDEP_SRCS-y                 += xenctrl_osdep_ENOSYS.c
 
 -include $(XEN_TARGET_ARCH)/Makefile
 
-CFLAGS   += -Werror -Wmissing-prototypes
+CFLAGS   += -Werror -Wmissing-prototypes -Wno-sizeof-pointer-memaccess	
 CFLAGS   += $(INCLUDES) -I. -I../xenstore -I../include
 
 # Needed for posix_fadvise64() in xc_linux.c

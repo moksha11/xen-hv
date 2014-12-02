@@ -3,5 +3,5 @@ include ../config-host.mak
 TARGET_ARCH=m68k
 TARGET_WORDS_BIGENDIAN=yes
 CONFIG_SOFTMMU=yes
-TARGET_XML_FILES= /home/sudarsun/xen-hv/tools/ioemu-qemu-xen/gdb-xml/cf-core.xml /home/sudarsun/xen-hv/tools/ioemu-qemu-xen/gdb-xml/cf-fp.xml
+TARGET_XML_FILES= /usr/src/xen-hv/tools/ioemu-qemu-xen/gdb-xml/cf-core.xml /usr/src/xen-hv/tools/ioemu-qemu-xen/gdb-xml/cf-fp.xml
 CONFIG_SOFTFLOAT=yes

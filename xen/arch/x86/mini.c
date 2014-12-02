@@ -22,13 +22,14 @@
 #include <mini.h>
 
 int pcount[COUNT_MAX];
-
 int enable_perfmon = 0;
 
 // vregion pool
 struct vregion_t *vregion_1mb_pool[MAX_VREGION_1MB_POOL];
 int vregion_1mb_pool_count;
 int num_vregions_per_1mb;
+int hetero_hotpg_cnt;
+
 #ifdef ENABLE_DENSITY
 atomic_t abit_density_shared[MAX_CACHE][32];
 #endif
@@ -1369,14 +1370,13 @@ int usched_print;
 void heartbeat(void)
 {
 	static int prev[COUNT_MAX];
-
-#if 0
 	myprintk(
 		"pt(%d,%d) sys:%d usched:%d gl:%d "
 //		"tm:%d ir:%d api:%d "
 		"ab:%d\t"
-		"$(%d %d) core(%d %d)\t"
+		"$(%d %d) core(%d %d) "
 #ifdef ENABLE_HOT_PAGES
+		"listcnt: %d "
 		"hot:%d (%d,%d,%d,%d) "
 #endif
 #ifdef ENABLE_HETERO
@@ -1403,6 +1403,7 @@ void heartbeat(void)
 		, 0, 0
 #endif
 #ifdef ENABLE_HOT_PAGES
+		, hetero_hotpg_cnt
 		, seed_user_hot->frame_count
 		, atomic_read(&hot_pages_vm[0])
 		, atomic_read(&hot_pages_vm[1])
@@ -1424,9 +1425,6 @@ void heartbeat(void)
 		, my_total_samples
 #endif
 	);
-
-#endif
-
 #if 0 // def DEBUG_WARN
 	int diff = pcount[COUNT_SYSCALL]-pcount[COUNT_SYSRET];
 	if (diff > max_proc || diff < -max_proc) {

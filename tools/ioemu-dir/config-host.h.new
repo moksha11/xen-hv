@@ -11,8 +11,6 @@
 
 #define CONFIG_VNC_TLS 1
 #define QEMU_VERSION "0.10.2"
-#define CONFIG_SDL 1
-#define CONFIG_OPENGL 1
 #define CONFIG_AIO 1
 #define HAVE_IOVEC 1
 #define CONFIG_UNAME_RELEASE ""
