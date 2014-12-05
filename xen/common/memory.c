@@ -158,11 +158,10 @@ int add_hotpage_tolist(struct page_info *page, unsigned int mfn) {
 
 	idx = 0;
  	if(hotmfns){
-		 idx = pages_added % MAX_HOT_MFNS;
-		 //if(hotmfns[idx] == 0) {
-			 hotmfns[idx] = mfn; 	
-			 pages_added++;
-		//}	
+        idx = pages_added % MAX_HOT_MFNS;
+		hotmfns[idx] = mfn;
+        hsm_add_mfn(mfn, pages_added);
+		pages_added++;
     }
 	return 0;
 }

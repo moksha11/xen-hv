@@ -41,10 +41,8 @@ long do_estate_op(int resource, int state, XEN_GUEST_HANDLE(void) ecap)
 
 long do_alloc_hetero_op(int pages)
 {
-    int ret;
-
     printk("calling do_alloc_hetero_op \n");
-    return ret;
+    return 0;
 }
 
 
@@ -55,52 +53,150 @@ long do_perfctr_op(int op, XEN_GUEST_HANDLE(void) arg)
     return 0;
 }
 
-struct data {
-    unsigned int first;
-    unsigned int second;
-    unsigned int third;
+struct frame {
+    unsigned int mfn;
 };
 
-void fill_page(char *ptr)
-{
-    struct data d;
-    d.first = 100;
-    d.second = 400;
-    d.third = 0;
+#define NUM_PAGES 4
+static void* shared_page[NUM_PAGES];
+static unsigned int frames_ppage = 0;
 
-    memcpy(ptr, (void *) &d, sizeof(struct data));
+static void setup_page(void *addr_page);
+static void *get_new_page(void);
+void hsm_add_mfn(unsigned int mfn, unsigned int idx);
+int hsm_setup(void);
+
+void hsm_add_mfn(unsigned int mfn, unsigned int idx)
+{
+    struct frame *f;
+    unsigned long offset;
+    unsigned int max_frames, pidx;
+
+    printk("add_mfn\n");
+    
+    if (frames_ppage == 0) {
+        printk("initialize shared pages first\n");
+        return;
+    }
+
+    for (pidx = 0; pidx < NUM_PAGES; ++pidx) {
+        if (shared_page[pidx] == NULL) {
+            printk("page %u not initialized\n", pidx);
+            return;
+        }
+    }
+
+    max_frames = frames_ppage * NUM_PAGES;
+    idx = idx % max_frames;
+    pidx = (idx * NUM_PAGES) / max_frames;
+    idx = idx - (frames_ppage * pidx); // compute the in-page index
+    offset = idx * sizeof(struct frame);
+    f = (void *)(((unsigned long)shared_page[pidx]) + offset);
+    printk("hsm_add_mfn() mfn=%u pidx=%u idx=%u f=%p offset=%lu\n", mfn, pidx,
+                                                            idx, f, offset);
+    f->mfn = mfn;
 }
 
-long do_hsm_get_mfn(XEN_GUEST_HANDLE(uint64_t) mfn)
+static void setup_page(void *addr_page)
 {
-    void *virt_ptr = NULL;
-    uint64_t _mfn = 0;
+    unsigned int fidx;
+    unsigned long offset;
+    struct frame f;
+    
+    f.mfn = 0;
+    offset = 0;
+    
+    if (addr_page == NULL) {
+        printk("initialize shared pages first\n");
+        return;
+    }
 
-    virt_ptr = alloc_xenheap_page();
+    printk("setup_page\n");
 
-    if (virt_ptr == NULL)
-        return 1;
-
-    clear_page(virt_ptr);
-    share_xen_page_with_guest(virt_to_page(virt_ptr), current->domain, XENSHARE_writable);
-
-    fill_page((char *) virt_ptr);
-    _mfn = virt_to_mfn(virt_ptr);
-
-    printk("_mfn = %" PRIu64 "\n", _mfn);
-    printk("ptr alloc'ed = %p\n", virt_ptr);
-
-    if (copy_to_guest(mfn, &_mfn, 1) != 0)
-        return 2;
-
-    return 0;
+    for (fidx = 0; fidx < frames_ppage; ++fidx)
+    {
+        offset = fidx * sizeof(struct frame);
+        printk("writing frame %u to %p\n", fidx,
+                (void *)(((unsigned long)addr_page) + offset));
+        memcpy((void *)(((unsigned long)addr_page) + offset),
+                                (void *) &f, sizeof(struct frame));
+    }
 }
 
-long do_hsm_free_mfn(uint64_t mfn)
+/* setup a shared memory page */
+static void *get_new_page(void)
 {
-    printk("mfn to free %" PRIu64 "\n", mfn);
-    printk("ptr to free %p\n", mfn_to_virt(mfn));
-    struct page_info *page = mfn_to_page(mfn);
+    void *addr_new_page = alloc_xenheap_page();
+
+    if (addr_new_page == NULL)
+        return NULL;
+
+    clear_page(addr_new_page);
+    share_xen_page_with_guest(virt_to_page(addr_new_page), current->domain, XENSHARE_writable);
+
+    printk("new page base addr = %p\n", addr_new_page);
+
+    return addr_new_page; 
+}
+
+int hsm_setup(void)
+{
+    int ret;
+    unsigned int pidx;
+
+    ret = 0;
+
+    if (frames_ppage != 0) {
+        ret = 1;
+        printk("shared pages have already been initialized\n");
+        goto out;
+    }
+
+    for (pidx = 0; pidx < NUM_PAGES; ++pidx) {
+        shared_page[pidx] = get_new_page();
+        setup_page(shared_page[pidx]);
+    }
+    
+    frames_ppage = PAGE_SIZE/sizeof(struct frame);
+    printk("hsm initialized\n");
+
+out:
+    return ret;
+}
+
+/* hypercall */
+long do_hsm_get_mfn(XEN_GUEST_HANDLE(uint64_t) guest_mfn)
+{
+    uint64_t mfn = 0;
+    long ret = 0;
+    static unsigned int mfn_idx = 0;
+
+    if (frames_ppage == 0) {
+        hsm_setup();
+    }
+   
+    if (mfn_idx < NUM_PAGES) {
+        mfn = virt_to_mfn(shared_page[mfn_idx]);
+        printk("mfn = %" PRIu64 "\n", mfn);
+        ++mfn_idx;
+
+        if (copy_to_guest(guest_mfn, &mfn, 1) != 0) {
+            ret = -1;
+            goto out;
+        }
+    }
+
+    ret = mfn_idx;
+out:
+    return ret;
+}
+
+int free_page(void *page_addr)
+{
+    struct page_info *page;
+
+    printk("ptr to free %p\n", page_addr);
+    page = virt_to_page(page_addr);
 
     if (test_and_clear_bit(_PGC_allocated, &(page->count_info)))
         put_page(page);
@@ -108,7 +204,22 @@ long do_hsm_free_mfn(uint64_t mfn)
     if (page->count_info & PGC_count_mask)
         return -EBUSY;
 
-    free_xenheap_page(mfn_to_virt(mfn));
-    printk("mfn %lu freed\n", mfn);
+    free_xenheap_page(page_addr);
+    return 0;
+}
+
+/* hypercall */
+long do_hsm_free_mfn(uint64_t mfn)
+{
+    unsigned int pidx;
+
+    (void)mfn; // ignore
+
+    for(pidx = 0; pidx < NUM_PAGES; ++pidx) {
+        printk("freeing page %u\n", pidx);
+        free_page(shared_page[pidx]);
+    }
+
+    frames_ppage = 0;
     return 0;
 }
