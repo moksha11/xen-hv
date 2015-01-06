@@ -355,7 +355,7 @@ static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memo
 
 #ifdef ENABLE_MULTI_NODE
 			if(d && d->domain_id > 0){
-				page = alloc_domheap_pages(d, a->extent_order, (a->memflags | MEMF_node(FAST_MEMORY_NODE) | MEMF_exact_node));
+				page = alloc_domheap_pages(d, a->extent_order, (a->memflags | MEMF_node(SLOW_MEMORY_NODE) | MEMF_exact_node));
 				//printk(KERN_DEBUG "hetero_populate_physmap: allocating from memory node %u \n",FAST_MEMORY_NODE);
 			}
 #else
