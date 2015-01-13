@@ -2074,7 +2074,11 @@ csched_tick(void *_cpu)
 #ifdef ENABLE_HOT_PAGES
 	if ( (spc->tick % 10 ) == 0 ) {	// 100ms
 		s_time_t now = NOW();
-		shrink_hot_pages(now);
+
+        if (hsm_trylock()) {
+		    shrink_hot_pages(now);
+            hsm_unlock();
+        }
 	}
 #endif
 #ifdef ENABLE_CACHE_BALANCE
