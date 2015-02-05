@@ -157,6 +157,7 @@ int add_hotpage_tolist(struct page_info *page, unsigned int mfn) {
 	}
 
 	idx = 0;
+
  	if(hotmfns){
         idx = pages_added % MAX_HOT_MFNS;
 		hotmfns[idx] = mfn;

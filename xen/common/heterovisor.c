@@ -82,26 +82,34 @@ int hsm_unlock()
     clear_bit(0, lock);
 }
 
+static unsigned int cur_idx;
+
+void hsm_reset_idx()
+{
+    cur_idx = 0;
+}
+
 void hsm_add_mfn(unsigned int mfn, unsigned int idx)
 {
     struct frame *f;
     unsigned long offset;
     unsigned int max_frames, pidx;
 
-    if (frames_ppage == 0) {
-        printk("initialize shared pages first\n");
-        return;
-    }
+    //if (frames_ppage == 0) {
+    //    printk("initialize shared pages first\n");
+    //    return;
+    //}
 
-    for (pidx = 0; pidx < NUM_PAGES; ++pidx) {
-        if (shared_page[pidx] == NULL) {
-            printk("page %u not initialized\n", pidx);
-            return;
-        }
-    }
+    //for (pidx = 0; pidx < NUM_PAGES; ++pidx) {
+    //    if (shared_page[pidx] == NULL) {
+    //        printk("page %u not initialized\n", pidx);
+    //        return;
+    //    }
+    //}
 
+    cur_idx++;
     max_frames = frames_ppage * NUM_PAGES;
-    idx = idx % max_frames;
+    idx = cur_idx % max_frames;
     pidx = (idx * NUM_PAGES) / max_frames;
     idx = idx - (frames_ppage * pidx); // compute the in-page index
     offset = idx * sizeof(struct frame);
@@ -110,8 +118,9 @@ void hsm_add_mfn(unsigned int mfn, unsigned int idx)
         return;
 
     f = (void *)(((unsigned long)shared_page[pidx]) + offset);
-    printk("hsm_add_mfn() mfn=%u pidx=%u idx=%u f=%p offset=%lu\n", mfn, pidx,
-                                                            idx, f, offset);
+    //printk("!hsm_add_mfn() mfn=%u pidx=%u idx=%u f=%p offset=%lu\n", mfn, pidx,
+    //                                                        idx, f, offset);
+
     f->mfn = mfn;
 }
 

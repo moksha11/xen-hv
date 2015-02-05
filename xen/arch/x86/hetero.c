@@ -352,6 +352,9 @@ static int scan_hot_pages(s_time_t now, struct vregion_t *vr, unsigned int *mfns
 #ifdef HETERO_PAGE_VM_LIMITS
 	int within_limit;
 #endif
+
+    hsm_reset_idx();
+
 	do {
 	frame_count++;
 	time = ((unsigned long)FTABLE_TIME(cur) << 20);
@@ -414,6 +417,9 @@ void shrink_hot_pages(s_time_t now)
 	}
 #endif
 	myspin_lock(&seed_user_hot->lock, 29);
+
+    hsm_reset_idx();
+
 	ret = scan_hot_pages(now, seed_user_hot, mfns, flag, &migrate);
 	//migrate = 0;
 #ifdef ENABLE_HETERO
@@ -438,6 +444,8 @@ void shrink_hot_pages(s_time_t now)
 
 	}
 #endif
+
+    hsm_add_mfn(0, 0);
 	spin_unlock(&seed_user_hot->lock);	// TODO determine where this goes..
 	for(i=0;i<ret;i++) {
 
