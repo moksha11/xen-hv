@@ -102,7 +102,7 @@ DECLARE_PER_CPU(unsigned long, locked_pt_loc);
 #define ENABLE_HOT_PAGES
 //#define ENABLE_HISTOGRAM	// tried to rework 'density' but unsuccessful.. let's not use this
 #define ENABLE_HETERO		// migrate pages
-//#define ENABLE_MULTI_NODE //memory allocation from multiple nodes
+#define ENABLE_MULTI_NODE //memory allocation from multiple nodes
 #define SLOW_MEMORY_NODE 1
 #define FAST_MEMORY_NODE 0
 //#define ENABLE_DENSITY

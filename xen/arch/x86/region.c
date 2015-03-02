@@ -276,10 +276,10 @@ struct vregion_t *vrt_set(unsigned long mfn, struct vregion_t *vr, int flags)
 			if (vm_id>=0 && vm_id < MAX_HETERO_VM) {
 				atomic_dec(&hot_pages_vm[vm_id]);
 			} else {
-				myprintk("WARN invalid vm_id:%d\n", vm_id);
+				myprintk("region.c: if ( old ) WARN invalid vm_id:%d\n", vm_id);
 			}
 		} else {
-			myprintk("WARN null owner..mfn:%lx\n", mfn);
+			myprintk("region.c: if ( old ) WARN null owner..mfn:%lx\n", mfn);
 		}
 			
 		}
@@ -335,10 +335,10 @@ if (!(was_null 						// xx --> seed
 			if (vm_id>=0 && vm_id < MAX_HETERO_VM) {
 				atomic_inc(&hot_pages_vm[vm_id]);
 			} else {
-				myprintk("WARN invalid vm_id:%d\n", vm_id);
+				myprintk("region.c: if (vr) WARN invalid vm_id:%d\n", vm_id);
 			}
 		} else {
-			myprintk("WARN null owner..mfn:%lx\n", mfn);
+			myprintk("region.c: if (vr) WARN null owner..mfn:%lx\n", mfn);
 		}
 			
 		}

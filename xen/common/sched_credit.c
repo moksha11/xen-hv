@@ -45,6 +45,7 @@
 /*
  * Basic constants
  */
+#define SHRINK_FREQ 5	
 #define CSCHED_DEFAULT_WEIGHT       256
 #define CSCHED_TICKS_PER_TSLICE     3
 #define CSCHED_TICKS_PER_ACCT       3
@@ -2072,7 +2073,7 @@ csched_tick(void *_cpu)
 //		print_pcpu();		// print binpacking
 	}
 #ifdef ENABLE_HOT_PAGES
-	if ( (spc->tick % 10 ) == 0 ) {	// 100ms
+	if ( (spc->tick % SHRINK_FREQ ) == 0 ) {	// 100ms
 		s_time_t now = NOW();
 		shrink_hot_pages(now);
 	}

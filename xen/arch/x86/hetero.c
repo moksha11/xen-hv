@@ -145,7 +145,7 @@ static int hetero(unsigned int mfn, int add /* 1 for add, 0 for del */)
 #if 0
 
 #ifdef ENABLE_MULTI_NODE
-		p = alloc_xenheap_pages(0,MEMF_node(FAST_MEMORY_NODE));
+		p = alloc_xenheap_pages(0,MEMF_node(SLOW_MEMORY_NODE));
 #else
 		p = myalloc_xenheap_page(10);
 #endif
@@ -162,10 +162,10 @@ static int hetero(unsigned int mfn, int add /* 1 for add, 0 for del */)
 				vm_tot_pages[vm_id] = vm->tot_pages;
 				atomic_inc(&hetero_pages_vm[vm_id]);
 			} else {
-				myprintk("WARN invalid vm_id:%d\n", vm_id);
+				myprintk("hetero.c: hetero() WARN invalid vm_id:%d\n", vm_id);
 			}
 		} else {
-			myprintk("WARN null owner..mfn:%lx\n", mfn);
+			myprintk("hetero.c: hetero() WARN null owner..mfn:%lx\n", mfn);
 		}
 
 #if 0
@@ -220,7 +220,6 @@ static int hetero(unsigned int mfn, int add /* 1 for add, 0 for del */)
 		} else {
 			myprintk("WARN dec null owner..mfn:%lx\n", mfn);
 		}
-
 		//add_hotpage_tolist(NULL,mfn);
 		//FTABLE_HETERO(mfn) = 0;
 #if 0
@@ -231,17 +230,21 @@ static int hetero(unsigned int mfn, int add /* 1 for add, 0 for del */)
 #endif
 
 	}
-
 //#endif
-
 	return rmap_count;
 }
 
 #endif
 
-#define MAX_SCAN	2048	// scan up to this number of pages..
-#define MAX_TEMP_MFNS	1024
-#define TIME_WINDOW	3000	// in millisec
+//#define MAX_SCAN	2048	// scan up to this number of pages..
+//#define MAX_TEMP_MFNS	1024
+//#define TIME_WINDOW	3000	// in millisec
+
+#define MAX_SCAN 32768	// scan up to this number of pages..
+#define MAX_TEMP_MFNS 16384
+#define TIME_WINDOW 1000 //2000	// in millisec
+
+
 // vr->lock is held when called.
 
 
