@@ -628,7 +628,8 @@ void print_vregion(struct vregion_t *vr, int flag)
 
 
 #ifdef DEBUG_CHECK_VREGION
-#define MAX_MFN_LIST	2560		// must be >= MAX_PAGES_IN_VREGION
+//#define MAX_MFN_LIST	2560		// must be >= MAX_PAGES_IN_VREGION
+#define MAX_MFN_LIST 65530
 struct mfn_list_t {
 	unsigned long mfn_list[MAX_MFN_LIST];
 };

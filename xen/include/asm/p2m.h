@@ -485,7 +485,7 @@ int guest_physmap_mark_populate_on_demand(struct domain *d, unsigned long gfn,
 static inline int guest_physmap_add_page(struct domain *d,
                                          unsigned long gfn,
                                          unsigned long mfn,
-                                         unsigned int page_order)
+                                        unsigned int page_order)
 {
     return guest_physmap_add_entry(d->arch.p2m, gfn, mfn, page_order, p2m_ram_rw);
 }

@@ -23,10 +23,10 @@ DECLARE_PER_CPU(unsigned long, locked_pt);
 DECLARE_PER_CPU(unsigned long, found_pt);
 DECLARE_PER_CPU(unsigned long, locked_pt_loc);
 
-#define DEBUG_STAT
-#define ENABLE_TRACK_SPINLOCK
-#define ENABLE_TRACK_MEMLEAK
-#define ENABLE_MYXTRACE
+//#define DEBUG_STAT
+//#define ENABLE_TRACK_SPINLOCK
+//#define ENABLE_TRACK_MEMLEAK
+//define ENABLE_MYXTRACE
 //#define ENABLE_RECORD
 /*
 #define ENABLE_SEPARATE_LIST
@@ -117,7 +117,8 @@ DECLARE_PER_CPU(unsigned long, locked_pt_loc);
 // max depends on the type of 'frames_count' in vregion_t
 // If you change the type of 'frames_count', also change type of abit_density to avoid overflow. So they should be of same type
 // also modify MAX_MFN_LIST, and MAX_HISTOGRAM
-#define MAX_PAGES_IN_VREGION	20000 //65530	//250
+//#define MAX_PAGES_IN_VREGION	20000 //65530	//250
+#define MAX_PAGES_IN_VREGION	65530	//250
 
 // conditions
 #if !defined(ENABLE_VREGIONS) && defined(ENABLE_GUEST_REGION)
@@ -143,7 +144,7 @@ DECLARE_PER_CPU(unsigned long, locked_pt_loc);
 #define VERBOSE_PAGE_FAULT
 
 
-#define MINI_DEVEL04		// choice..
+//#define MINI_DEVEL04		// choice..
 
 #ifdef MINI_DEVEL00		// production run
 #endif

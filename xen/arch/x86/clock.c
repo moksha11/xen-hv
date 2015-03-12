@@ -334,7 +334,7 @@ int clear_abit_leaf(struct page_table *pt, s_time_t now)
 #define THRESHOLD_HOT	2
 		int hotness = bitcount(FTABLE_ABIT(mfn));
 		if (hotness_prev < THRESHOLD_HOT && hotness >= THRESHOLD_HOT) {	// this throttles # of pages entering hot list..
-			printk("Adding mfn to hotlist \n");
+			//printk("Adding mfn to hotlist \n");
 			vrt_set(mfn, seed_user_hot, VRT_SET_LOCK_SYNC | VRT_SET_MAYBE_SAME);	// may be set to same..
 		}
 #endif
