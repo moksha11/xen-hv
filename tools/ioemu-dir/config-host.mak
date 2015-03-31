@@ -33,6 +33,13 @@ VERSION=0.10.2
 SRC_PATH=/usr/src/xen-hv/tools/ioemu-qemu-xen
 VPATH=/usr/src/xen-hv/tools/ioemu-qemu-xen
 TARGET_DIRS=i386-softmmu x86_64-softmmu arm-softmmu cris-softmmu m68k-softmmu mips-softmmu mipsel-softmmu mips64-softmmu mips64el-softmmu ppc-softmmu ppcemb-softmmu ppc64-softmmu sh4-softmmu sh4eb-softmmu sparc-softmmu i386-linux-user x86_64-linux-user alpha-linux-user arm-linux-user armeb-linux-user cris-linux-user m68k-linux-user mips-linux-user mipsel-linux-user ppc-linux-user ppc64-linux-user ppc64abi32-linux-user sh4-linux-user sh4eb-linux-user sparc-linux-user sparc64-linux-user sparc32plus-linux-user 
+CONFIG_SDL=yes
+SDL_LIBS=-L/usr/lib/x86_64-linux-gnu -lSDL -lX11
+SDL_CFLAGS=-I/usr/include/SDL -D_GNU_SOURCE=1 -D_REENTRANT
+CONFIG_OPENGL=yes
+SDL_CFLAGS+=-I/usr/include/GL
+SDL_LIBS+=-lXext
+SDL_LIBS+=-lGL
 CONFIG_BRLAPI=yes
 BRLAPI_LIBS=-lbrlapi
 CONFIG_BLUEZ=yes

@@ -1320,7 +1320,9 @@ asmlinkage void do_page_fault(struct cpu_user_regs *regs)
 #endif
 #ifdef ENABLE_CHECK_PAGE_TOUCH
 		if (mini_activated) {
+			#ifdef DEBUG_STAT
 			current->vcount[PTOUCH_PAGE_FAULT]++;
+			#endif
 		}
 #if 1
 	// vsyscall causes page fault even under normal xen.. 
@@ -1386,7 +1388,8 @@ asmlinkage void do_page_fault(struct cpu_user_regs *regs)
 	if (pf_count>0)
 		printk(" ->propagate\n");
 #endif
-#if 1
+
+#ifdef DEBUG_STAT
 	if (mini_activated)
 		current->vcount[PTOUCH_PROPAGATE_GUEST]++;
 #endif

@@ -236,6 +236,73 @@ DEFINE_PER_CPU(unsigned long [BITS_TO_LONGS(L4_PAGETABLE_ENTRIES)], abits);
 #error bitmap_basic or bitmap_vrt ?
 #endif
 
+#if 1
+/*Sudarsun modified version. If this causes problem 
+switch to the originial code by setting #if 0*/
+int clear_abit_leaf(struct page_table *pt, s_time_t now)
+{
+	int count = 0;
+	int cache;
+	l1_pgentry_t *l1t;
+	unsigned int pos;
+	struct l1e_struct *aux = pt->aux;
+	MYASSERT(aux);
+
+	unsigned long (*abits)[BITS_TO_LONGS(L4_PAGETABLE_ENTRIES)];
+	abits = &(per_cpu(abits, smp_processor_id()));
+	memset(abits, 0, sizeof(*abits));
+	for (cache = 0; cache < max_cache; cache++) {
+	l1t = pt->shadow[cache];
+	for ( pos = find_first_bit(aux->bitmap[BITMAP_INDEX], L4_PAGETABLE_ENTRIES);
+		pos < L4_PAGETABLE_ENTRIES;
+		pos = find_next_bit(aux->bitmap[BITMAP_INDEX], L4_PAGETABLE_ENTRIES, pos+1) )
+	{
+		if (unlikely(test_and_clear_bit( 5, &l1t[pos].l1))) {	// _PAGE_ACCESSED
+			set_bit(pos, abits);
+		}
+	}
+	}
+#ifdef ENABLE_HETERO
+	// set l1t to original pt of guests. So abit will be attibuted to the original page, not hetero page.
+	l1t = mfn_to_virt(pt->mfn);
+#else
+	// l1t is last one from previous loop
+#endif
+	unsigned long mfn;
+	for ( pos = find_first_bit(aux->bitmap[0], L4_PAGETABLE_ENTRIES);
+		pos < L4_PAGETABLE_ENTRIES;
+		pos = find_next_bit(aux->bitmap[0], L4_PAGETABLE_ENTRIES, pos+1) )
+	{
+		mfn = l1e_get_pfn(l1t[pos]);
+#ifdef ENABLE_HOT_PAGES
+		int hotness_prev = bitcount(FTABLE_ABIT(mfn));
+#endif
+		if (test_bit(pos, abits)) {
+			count++;
+			FTABLE_ABIT(mfn) >>= 1;
+			FTABLE_ABIT(mfn) |= (1UL<<31);
+		} else {
+           // TODO: in case of shared vr, it may experience much faster
+           // aging because we're scanning more than one address space..so..
+			FTABLE_ABIT(mfn) >>= 1;
+		}
+		// roughly in millisec
+		FTABLE_TIME(mfn) = (now >> 20);	// TODO: wrap up??
+
+#ifdef ENABLE_HOT_PAGES
+#define THRESHOLD_HOT 2
+		int hotness = bitcount(FTABLE_ABIT(mfn));
+		if (hotness_prev < THRESHOLD_HOT && hotness >= THRESHOLD_HOT) {	// this throttles # of pages entering hot list..
+			//printk("Adding mfn to hotlist \n");
+			vrt_set(mfn, seed_user_hot, VRT_SET_LOCK_SYNC | VRT_SET_MAYBE_SAME);	// may be set to same..
+		}
+#endif
+	}
+	return count;
+}
+
+#else
+
 int clear_abit_leaf(struct page_table *pt, s_time_t now)
 {
 	int count = 0;
@@ -341,6 +408,7 @@ int clear_abit_leaf(struct page_table *pt, s_time_t now)
 	}
 	return count;
 }
+#endif
 
 int clear_abit_pt(struct page_table *up_pt, s_time_t now)
 {

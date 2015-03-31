@@ -1341,6 +1341,7 @@ int csched_info(struct vcpu *v, unsigned long array[]);
 #endif
 }
 
+#ifdef DEBUG_STAT
 void print_each_vcpu(void)
 {
 	struct vcpu *v;
@@ -1365,6 +1366,7 @@ void print_each_vcpu(void)
 	}
 	rcu_read_unlock(&domlist_read_lock);
 }
+#endif
 
 int usched_print;
 

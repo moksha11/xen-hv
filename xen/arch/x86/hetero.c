@@ -21,8 +21,8 @@
 #include <xen/softirq.h>
 #include <mini.h>
 
-#define HETERO_SYNC1	// first try
-#define HETERO_SYNC2
+//#define HETERO_SYNC1	// first try
+//#define HETERO_SYNC2
 
 #define HETEROMEM2
 
@@ -240,9 +240,9 @@ static int hetero(unsigned int mfn, int add /* 1 for add, 0 for del */)
 //#define MAX_TEMP_MFNS	1024
 //#define TIME_WINDOW	3000	// in millisec
 
-#define MAX_SCAN 65536	// scan up to this number of pages..
-#define MAX_TEMP_MFNS 32768
-#define TIME_WINDOW 500 //2000	// in millisec
+#define MAX_SCAN 16384	// scan up to this number of pages..
+#define MAX_TEMP_MFNS 8192
+#define TIME_WINDOW 2000	// in millisec
 
 
 // vr->lock is held when called.
@@ -402,7 +402,88 @@ static int scan_hot_pages(s_time_t now, struct vregion_t *vr, unsigned int *mfns
 DEFINE_PER_CPU(unsigned int [MAX_TEMP_MFNS], mfns_from_hot_list);
 DEFINE_PER_CPU(char [MAX_TEMP_MFNS], flag_from_hot_list);
 
+
 void shrink_hot_pages(s_time_t now)
+{
+	unsigned int *mfns = per_cpu(mfns_from_hot_list, smp_processor_id());
+	char *flag = per_cpu(flag_from_hot_list, smp_processor_id());
+//	unsigned int (*mfns)[MAX_TEMP_MFNS] = &(per_cpu(mfns_from_hot_list, smp_processor_id()));
+//	char (*flag)[MAX_TEMP_MFNS] = &(per_cpu(flag_from_hot_list, smp_processor_id()));
+	int i, ret, migrate;
+
+	if(atomic_read(&disabl_shrink_hotpg))
+		return;
+
+#ifdef HETERO_PAGE_VM_LIMITS
+	for(i=0;i<MAX_HETERO_VM;i++) {
+		hetero_pages_vm_expect[i] = 0;
+	}
+#endif
+	myspin_lock(&seed_user_hot->lock, 29);
+	ret = scan_hot_pages(now, seed_user_hot, mfns, flag, &migrate);
+	//migrate = 0;
+
+#ifdef ENABLE_HETERO
+	if (migrate)	// true if any copy is necessary..
+	{
+
+#ifdef HETERO_SYNC1
+	atomic_set(&simple_barrier, max_proc-1);
+	if (!myspin_trylock(&hetero_lock, 34)) {
+		mypanic("TODO skip hetero() call to avoid deadlock..\n");
+		return;
+	}
+	smp_call_function(hetero_wait, NULL, 0);
+
+#ifdef HETERO_SYNC2
+	for(;atomic_read(&simple_barrier););	// wait for others
+#endif
+//	myprintk("all reached here\n");
+#endif
+
+	int copy_count = 0;
+	int rmap_count = 0;
+	for(i=0;i<ret;i++) {
+		if (!flag[i]) {
+			if (FTABLE_HETERO(mfns[i])) {
+				rmap_count += hetero(mfns[i], 0);
+				copy_count++;
+			}
+		} else {
+			MYASSERT(FTABLE_HETERO(mfns[i]) == 0);
+			rmap_count += hetero(mfns[i], 1);
+			copy_count++;
+		}
+	}
+
+#ifdef HETERO_SYNC1
+	spin_unlock(&hetero_lock);
+#endif
+	flush_tlb_local();	// TODO: or global? where is correct location?a
+	}
+#endif
+	spin_unlock(&seed_user_hot->lock);	// TODO determine where this goes..
+
+	for(i=0;i<ret;i++) {
+
+		 if(mfns[i])
+    	  	add_hotpage_tolist(NULL,mfns[i]);
+
+#ifdef ENABLE_HETERO
+		if (flag[i])
+			continue;
+		//MYASSERT(FTABLE_HETERO(mfns[i])==0);
+#endif
+
+		vrt_set(mfns[i], NULL, VRT_SET_LOCK_SYNC);	// TODO: check old value.. should be seed_user_hot
+		// reset: TODO: needs lock??
+		FTABLE_TIME(mfns[i]) = 0;
+		FTABLE_ABIT(mfns[i]) = 0;
+	}
+}
+
+
+void shrink_hot_pages_old(s_time_t now)
 {
 	unsigned int *mfns = per_cpu(mfns_from_hot_list, smp_processor_id());
 	char *flag = per_cpu(flag_from_hot_list, smp_processor_id());
@@ -428,20 +509,22 @@ void shrink_hot_pages(s_time_t now)
 			if (!flag[i]) {
 				if (FTABLE_HETERO(mfns[i])) {
 					rmap_count += hetero(mfns[i], 0);
-					//add_hotpage_tolist(NULL,mfns[i]);
+					add_hotpage_tolist(NULL,mfns[i]);
 					copy_count++;
 				}
 			} else {
 				MYASSERT(FTABLE_HETERO(mfns[i]) == 0);
 				rmap_count += hetero(mfns[i], 1);
-				//add_hotpage_tolist(NULL,mfns[i]);
+				add_hotpage_tolist(NULL,mfns[i]);
 				copy_count++;
 			}
 		}
 
 	}
 #endif
+
 	spin_unlock(&seed_user_hot->lock);	// TODO determine where this goes..
+
 	for(i=0;i<ret;i++) {
 
 	add_hotpage_tolist(NULL,mfns[i]);	
@@ -464,7 +547,7 @@ void shrink_hot_pages(s_time_t now)
 
 
 
-void shrink_hot_pages_orig(s_time_t now)
+void shrink_hot_pages_working(s_time_t now)
 {
 	unsigned int *mfns = per_cpu(mfns_from_hot_list, smp_processor_id());
 	char *flag = per_cpu(flag_from_hot_list, smp_processor_id());
@@ -529,10 +612,8 @@ void shrink_hot_pages_orig(s_time_t now)
 
 	for(i=0;i<ret;i++) {
 
-	 //if(mfns[i])
-       // add_hotpage_tolist(NULL,mfns[i]);
-
-
+	 if(mfns[i])
+       add_hotpage_tolist(NULL,mfns[i]);
 
 #ifdef ENABLE_HETERO
 		if (flag[i])

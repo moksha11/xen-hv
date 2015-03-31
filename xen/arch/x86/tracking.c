@@ -28,6 +28,14 @@ int track_spinlock_total[MAX_TRACK_SPINLOCK];
 
 extern void mydump_registers(void);
 void myspin_lock(spinlock_t *_lock, int loc) {
+
+#ifdef SUD_DISABLE_SPINLOCK
+	if (spin_trylock(_lock)) {
+		return;
+	}
+#else
+
+try_lock:
 	if (!spin_trylock(_lock)) {
 		int i = 0, count = 0;
 		s_time_t prev=NOW();
@@ -36,12 +44,21 @@ void myspin_lock(spinlock_t *_lock, int loc) {
 			if (spin_trylock(_lock))
 				break;
 			i++;
-			if (i>=10000000) {
+
+
+			if (i>=5000000) {
 				myprintk("WARN deadlock? %d@%d waiting. holder:%d@%d\n", loc, smp_processor_id(), (_lock)->location, (_lock)->proc);
 				i=0;
 				count++;
-				if (count > 20) {
-					mypanic("spinlock limit hit\n");
+
+				if (count > 100){
+					 myprintk("WARN deadlock? %d@%d waiting. holder:%d@%d\n", loc, smp_processor_id(), (_lock)->location, (_lock)->proc);
+					 spin_unlock(_lock);
+					 //goto try_lock;
+				}
+
+				if (count > 100) {
+					//mypanic("spinlock limit hit\n");
 				}
 			}
 
@@ -51,6 +68,7 @@ void myspin_lock(spinlock_t *_lock, int loc) {
 	track_spinlock_total[loc]++;
 	(_lock)->location = loc;
 	(_lock)->proc = smp_processor_id();
+#endif
 }
 
 void spinlock_report(void)

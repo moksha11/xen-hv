@@ -40,8 +40,8 @@ static unsigned int guest_startidx;
 static unsigned int guest_stopidx;
 atomic_t disabl_shrink_hotpg;
 
-#define MAX_HOT_MFNS 262144
-#define MAX_HOT_MFNS_GUEST 262144
+#define MAX_HOT_MFNS 64000
+#define MAX_HOT_MFNS_GUEST 64000
 
 
 PAGE_LIST_HEAD(in_hotskip_list);
@@ -141,9 +141,12 @@ int add_hotpage_tolist(struct page_info *page, unsigned int mfn) {
 	unsigned int idx=0;
 	size_t size=0;	
 
+	//if(pages_added >= MAX_HOT_MFNS)
+	//	return 0; 
+
 	//printk("calling add_hotpage_tolist ...1\n");
-	//if(atomic_read(&disabl_shrink_hotpg))
-      //  return 0;
+	if(atomic_read(&disabl_shrink_hotpg))
+        return 0;
 	
 	//failure if return is > 0
 	if(check_if_valid_domain_pg(mfn))

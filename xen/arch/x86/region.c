@@ -24,6 +24,7 @@
 #ifdef ENABLE_VREGIONS
 spinlock_t vregions_seed_lock;
 spinlock_t vregions_free_lock;
+spinlock_t biglock;
 LIST_HEAD(vregions_seed);
 LIST_HEAD(vregions_free);
 int vregions_seed_count;
@@ -205,12 +206,20 @@ struct vregion_t *get_seed_xen(void)	// TODO: refcnt on return value? probably I
 	return seed_xen;
 }
 
+
+
+
+
+//#ifndef SUD_DISABLE_SPINLOCK	 
+//ORIGINAL CODE
+#if 0
 struct vregion_t *vrt_set(unsigned long mfn, struct vregion_t *vr, int flags)
 {
 	int i;
 	int was_null = flags & VRT_SET_WAS_NULL;
 	struct rmaps_builtin *r;
 	int maybe_same = flags & VRT_SET_MAYBE_SAME;
+
 	if (!was_null && !vr) {
 #ifdef ENABLE_RMAP
 		// speculative peek without holding lock. we need check it again below.
@@ -418,6 +427,459 @@ same_vr:
 
 	return NULL;
 }
+#else
+
+
+//Highly modified version from sudarsun. 
+//If code crashes enable the original function above.
+struct vregion_t *vrt_set(unsigned long mfn, struct vregion_t *vr, int flags)
+{
+	int i;
+	int was_null = flags & VRT_SET_WAS_NULL;
+	struct rmaps_builtin *r;
+	int maybe_same = flags & VRT_SET_MAYBE_SAME;
+
+	//spin_lock(&biglock);
+
+	if (!was_null && !vr) {
+#ifdef ENABLE_RMAP
+		// speculative peek without holding lock. we need check it again below.
+		r = &FTABLE_RMAPS(mfn,RMAPS_USER);
+		if (r->rmap_count) {
+			vr = get_seed_user();
+		} else {
+			r = &FTABLE_RMAPS(mfn,RMAPS_KERNEL);
+			if (r->rmap_count)
+				vr = get_seed_kernel();
+			else
+				vr = get_seed_xen();
+		}
+#else
+		vr = get_seed_xen();
+#endif
+		was_null = 1;
+	}
+
+	//if(vr)
+	//spin_lock(&biglock);
+
+#ifdef DEBUG_ASSERT
+	if (vr && vr < (struct vregion_t *)VRT_MASK) mypanic("vrt_set: vr && vr < VRT_MASK");
+#endif
+	mfn_check(mfn);
+
+	struct vregion_t *old;
+	if (flags & VRT_SET_LOCK_SYNC) {
+		myspin_lock(&SYNC_LOCK(mfn), 44);
+	}
+	MYASSERT(spin_is_locked(&SYNC_LOCK(mfn)));
+	old = _vrt_set(mfn, vr);
+#ifdef DEBUG_ASSERT
+	if (flags & VRT_SET_INIT) {
+		MYASSERT(!old);
+	} else
+		MYASSERT(old);
+#endif
+	// here _vrt_set() was successful, vr_get() was called already.
+	if ( old == vr )
+	{
+		if (maybe_same) {	// TODO: optimize more.. maybe just peek without locking.. see split_vregion
+			goto same_vr;	// skip mfn_chain things..
+		}
+		myprintk("old vr\n");
+		print_vregion(old, 0);
+		myprintk("new vr\n");
+		print_vregion(vr, 0);
+		mypanic("WARN Unnecessary vrt_set..Set to same vr??\n");
+	}
+
+	// if parent==NULL, clear abit_history
+	if ( old ) {
+#if 1
+		if (old == seed_user_hot) {
+		struct domain *vm = page_get_owner(__mfn_to_page(mfn));
+		if (vm) {
+			int vm_id = vm->domain_id;
+			if (vm_id>=0 && vm_id < MAX_HETERO_VM) {
+				atomic_dec(&hot_pages_vm[vm_id]);
+			} else {
+				myprintk("region.c: if ( old ) WARN invalid vm_id:%d\n", vm_id);
+			}
+		} else {
+			myprintk("region.c: if ( old ) WARN null owner..mfn:%lx\n", mfn);
+		}
+			
+		}
+#endif
+		myspin_lock(&old->lock, 45);
+#ifdef DEBUG_ASSERT
+if (!(was_null 						// xx --> seed
+	|| test_bit(VR_POOL, &old->flags) 		// seed --> xx
+	|| test_bit(VR_NO_REGIONING, &vr->flags)	// xx --> global
+	|| (test_bit(VR_REGULAR, &old->flags) && test_bit(VR_REGULAR, &vr->flags))	// reg --> reg.. merge during regioning..
+	)) {
+	myprintk("old vr\n");
+	print_vregion(old, 0);
+	myprintk("new vr\n");
+	print_vregion(vr, 0);
+	mypanic("not-permitted transition ??");
+}
+#endif
+		vr_dec_frame_count(old);
+#ifdef ENABLE_RMAP
+		for(i=0;i<RMAPS_MAX;i++) {
+			r = &FTABLE_RMAPS(mfn,i);
+			vr_sub_rmap_count(old, r->rmap_count, i);
+		}
+#endif
+#ifdef ENABLE_HISTOGRAM
+//		for(i=0;i<MAX_CACHE;i++) {
+//			vr_dec_density(old, bitcount(ABIT_HISTORY(mfn, i)), i);
+//		}
+		vr_dec_density(old, bitcount(FTABLE_ABIT(mfn)), 0 );
+#endif
+		mfn_chain_del(mfn, old);
+#ifdef ENABLE_VREGION_MAPPING	// TODO: this is naive implementation.. needs optimization
+		for(i=0;i<MAX_CACHE;i++) {
+			if (!is_vregion_cache_mapped(old, i))
+				open_mfn(mfn, i, NULL, 0);
+		}
+#endif
+#ifdef ENABLE_REGIONING3
+		if (test_bit(VR_NO_REGIONING, &old->flags)) {	// exiting no_regioning vr
+			close_mfn(mfn, -1, NULL, 1);
+		}
+#endif
+		spin_unlock(&old->lock);
+	}
+//	MYASSERT( FTABLE_NEXT(mfn) == -1 && FTABLE_PREV(mfn) == -1 );
+	if (vr) {
+#if 1
+		if (vr == seed_user_hot) {
+		struct domain *vm = page_get_owner(__mfn_to_page(mfn));
+		if (vm) {
+			int vm_id = vm->domain_id;
+			if (vm_id>=0 && vm_id < MAX_HETERO_VM) {
+				atomic_inc(&hot_pages_vm[vm_id]);
+			} else {
+				myprintk("region.c: if (vr) WARN invalid vm_id:%d\n", vm_id);
+			}
+		} else {
+			myprintk("region.c: if (vr) WARN null owner..mfn:%lx\n", mfn);
+		}
+			
+		}
+#endif
+		myspin_lock(&vr->lock, 99);
+#ifdef ENABLE_HISTOGRAM
+		vr_inc_density(vr, bitcount(FTABLE_ABIT(mfn)), 0);
+#endif
+#ifdef ENABLE_DENSITY
+		if (parent==NULL) {
+			// abit_history and density is init'ed 
+			// only when physical page enters region.
+			// TODO: if abit_history is recent enough, we can use it.
+			for(i=0;i<MAX_CACHE;i++) {
+				ABIT_HISTORY(mfn,i) = 0;
+				vr_inc_density(vr, 0, i);
+			}
+		} else {
+			for(i=0;i<MAX_CACHE;i++) {
+				vr_inc_density(vr, bitcount(ABIT_HISTORY(mfn, i)), i);
+			}
+//			vr->last_abit_update is updated after returning this func
+		}
+#endif
+#ifdef ENABLE_RMAP
+#ifndef ENABLE_HETERO
+		r = &FTABLE_RMAPS(mfn,RMAPS_USER);
+		if (test_bit(VR_USER, &vr->flags) && !r->rmap_count) {
+			MYASSERT(flags & VRT_SET_SKIP_UNLOCK_VR2);
+		}
+		if (test_bit(VR_KERNEL, &vr->flags) && r->rmap_count) {
+			MYASSERT(flags & VRT_SET_SKIP_UNLOCK_VR2);
+		}
+//		if (test_bit(VR_XEN, &vr->flags) && r->rmap_count) {
+//			MYASSERT(flags & VRT_SET_SKIP_UNLOCK_VR2);
+//		}
+#endif
+		int count = 0;
+		for(i=0;i<RMAPS_MAX;i++) {
+			r = &FTABLE_RMAPS(mfn,i);
+			vr_add_rmap_count(vr, r->rmap_count, i);
+			count += r->rmap_count;
+		}
+		if (test_bit(VR_SHRINK_NORMAP, &vr->flags))	// always non-zero rmaps for this attribute
+			MYASSERT(count);
+#endif
+		vr_inc_frame_count(vr);
+		mfn_chain_add(mfn, vr);
+#ifdef ENABLE_VREGION_MAPPING	// TODO: this is naive implementation.. needs optimization
+		for(i=0;i<MAX_CACHE;i++) {
+			if (!is_vregion_cache_mapped(vr, i)) {
+				close_mfn(mfn, i, NULL, 0);
+			}
+		}
+#endif
+#ifdef ENABLE_REGIONING3
+		if (test_bit(VR_NO_REGIONING, &vr->flags)) {	// entering of no_regioning vr
+			open_mfn(mfn, -1, NULL, 1);
+		}
+#endif
+		if (!(flags & VRT_SET_SKIP_UNLOCK_VR2))		// if SKIP_UNLOCK_VR2 is set, must not spin_lock vr after this point until vr is unlocked at calling func.
+			spin_unlock(&vr->lock);
+	}
+same_vr:
+	//if(vr)
+	//spin_unlock(&biglock);
+
+//	check_cacheman();
+	if (flags & VRT_SET_LOCK_SYNC)
+		spin_unlock(&SYNC_LOCK(mfn));	// end of sync. so now vr has this mfn.
+	
+	if ((flags & VRT_SET_RETURN_OLD) && old) {
+		vr_get(old, VR_REFCNT_VRT_TEMP);
+		vr_put(old, VR_REFCNT_VRT, 0);
+		return old;
+	}
+
+	if (old)
+		vr_put(old, VR_REFCNT_VRT, 2);
+
+	return NULL;
+}
+#endif
+
+
+
+/*
+struct vregion_t *vrt_set(unsigned long mfn, struct vregion_t *vr, int flags)
+{
+	int i;
+	int was_null = flags & VRT_SET_WAS_NULL;
+	struct rmaps_builtin *r;
+	int maybe_same = flags & VRT_SET_MAYBE_SAME;
+
+	//spin_lock(&biglock);
+
+	if (!was_null && !vr) {
+#ifdef ENABLE_RMAP
+		// speculative peek without holding lock. we need check it again below.
+		r = &FTABLE_RMAPS(mfn,RMAPS_USER);
+		if (r->rmap_count) {
+			vr = get_seed_user();
+		} else {
+			r = &FTABLE_RMAPS(mfn,RMAPS_KERNEL);
+			if (r->rmap_count)
+				vr = get_seed_kernel();
+			else
+				vr = get_seed_xen();
+		}
+#else
+		vr = get_seed_xen();
+#endif
+		was_null = 1;
+	}
+
+	//if(vr)
+	//spin_lock(&biglock);
+
+#ifdef DEBUG_ASSERT
+	if (vr && vr < (struct vregion_t *)VRT_MASK) mypanic("vrt_set: vr && vr < VRT_MASK");
+#endif
+	mfn_check(mfn);
+
+	struct vregion_t *old;
+	if (flags & VRT_SET_LOCK_SYNC) {
+		myspin_lock(&SYNC_LOCK(mfn), 44);
+	}
+	MYASSERT(spin_is_locked(&SYNC_LOCK(mfn)));
+	old = _vrt_set(mfn, vr);
+#ifdef DEBUG_ASSERT
+	if (flags & VRT_SET_INIT) {
+		MYASSERT(!old);
+	} else
+		MYASSERT(old);
+#endif
+	// here _vrt_set() was successful, vr_get() was called already.
+	if ( old == vr )
+	{
+		if (maybe_same) {	// TODO: optimize more.. maybe just peek without locking.. see split_vregion
+			goto same_vr;	// skip mfn_chain things..
+		}
+		myprintk("old vr\n");
+		print_vregion(old, 0);
+		myprintk("new vr\n");
+		print_vregion(vr, 0);
+		mypanic("WARN Unnecessary vrt_set..Set to same vr??\n");
+	}
+#ifdef DEBUG_ASSERT
+#ifdef ENABLE_GUEST_REGION
+	// TODO:enable
+//	if (vr && old && test_bit(VR_GUEST, &old->flags) && test_bit(VR_REGULAR, &vr->flags))
+//		mypanic("Guest-vr -> regular??\n");
+#endif
+#endif
+
+	// if parent==NULL, clear abit_history
+	if ( old ) {
+#if 1
+		if (old == seed_user_hot) {
+		struct domain *vm = page_get_owner(__mfn_to_page(mfn));
+		if (vm) {
+			int vm_id = vm->domain_id;
+			if (vm_id>=0 && vm_id < MAX_HETERO_VM) {
+				atomic_dec(&hot_pages_vm[vm_id]);
+			} else {
+				myprintk("region.c: if ( old ) WARN invalid vm_id:%d\n", vm_id);
+			}
+		} else {
+			myprintk("region.c: if ( old ) WARN null owner..mfn:%lx\n", mfn);
+		}
+			
+		}
+#endif
+		myspin_lock(&old->lock, 45);
+#ifdef DEBUG_ASSERT
+if (!(was_null 						// xx --> seed
+	|| test_bit(VR_POOL, &old->flags) 		// seed --> xx
+	|| test_bit(VR_NO_REGIONING, &vr->flags)	// xx --> global
+	|| (test_bit(VR_REGULAR, &old->flags) && test_bit(VR_REGULAR, &vr->flags))	// reg --> reg.. merge during regioning..
+	)) {
+	myprintk("old vr\n");
+	print_vregion(old, 0);
+	myprintk("new vr\n");
+	print_vregion(vr, 0);
+	mypanic("not-permitted transition ??");
+}
+#endif
+		vr_dec_frame_count(old);
+#ifdef ENABLE_RMAP
+		for(i=0;i<RMAPS_MAX;i++) {
+			r = &FTABLE_RMAPS(mfn,i);
+			vr_sub_rmap_count(old, r->rmap_count, i);
+		}
+#endif
+#ifdef ENABLE_HISTOGRAM
+//		for(i=0;i<MAX_CACHE;i++) {
+//			vr_dec_density(old, bitcount(ABIT_HISTORY(mfn, i)), i);
+//		}
+		vr_dec_density(old, bitcount(FTABLE_ABIT(mfn)), 0 );
+#endif
+		mfn_chain_del(mfn, old);
+#ifdef ENABLE_VREGION_MAPPING	// TODO: this is naive implementation.. needs optimization
+		for(i=0;i<MAX_CACHE;i++) {
+			if (!is_vregion_cache_mapped(old, i))
+				open_mfn(mfn, i, NULL, 0);
+		}
+#endif
+#ifdef ENABLE_REGIONING3
+		if (test_bit(VR_NO_REGIONING, &old->flags)) {	// exiting no_regioning vr
+			close_mfn(mfn, -1, NULL, 1);
+		}
+#endif
+		spin_unlock(&old->lock);
+	}
+//	MYASSERT( FTABLE_NEXT(mfn) == -1 && FTABLE_PREV(mfn) == -1 );
+	if (vr) {
+#if 1
+		if (vr == seed_user_hot) {
+		struct domain *vm = page_get_owner(__mfn_to_page(mfn));
+		if (vm) {
+			int vm_id = vm->domain_id;
+			if (vm_id>=0 && vm_id < MAX_HETERO_VM) {
+				atomic_inc(&hot_pages_vm[vm_id]);
+			} else {
+				myprintk("region.c: if (vr) WARN invalid vm_id:%d\n", vm_id);
+			}
+		} else {
+			myprintk("region.c: if (vr) WARN null owner..mfn:%lx\n", mfn);
+		}
+			
+		}
+#endif
+		myspin_lock(&vr->lock, 99);
+#ifdef ENABLE_HISTOGRAM
+		vr_inc_density(vr, bitcount(FTABLE_ABIT(mfn)), 0);
+#endif
+#ifdef ENABLE_DENSITY
+		if (parent==NULL) {
+			// abit_history and density is init'ed 
+			// only when physical page enters region.
+			// TODO: if abit_history is recent enough, we can use it.
+			for(i=0;i<MAX_CACHE;i++) {
+				ABIT_HISTORY(mfn,i) = 0;
+				vr_inc_density(vr, 0, i);
+			}
+		} else {
+			for(i=0;i<MAX_CACHE;i++) {
+				vr_inc_density(vr, bitcount(ABIT_HISTORY(mfn, i)), i);
+			}
+//			vr->last_abit_update is updated after returning this func
+		}
+#endif
+#ifdef ENABLE_RMAP
+#ifndef ENABLE_HETERO
+		r = &FTABLE_RMAPS(mfn,RMAPS_USER);
+		if (test_bit(VR_USER, &vr->flags) && !r->rmap_count) {
+			MYASSERT(flags & VRT_SET_SKIP_UNLOCK_VR2);
+		}
+		if (test_bit(VR_KERNEL, &vr->flags) && r->rmap_count) {
+			MYASSERT(flags & VRT_SET_SKIP_UNLOCK_VR2);
+		}
+//		if (test_bit(VR_XEN, &vr->flags) && r->rmap_count) {
+//			MYASSERT(flags & VRT_SET_SKIP_UNLOCK_VR2);
+//		}
+#endif
+		int count = 0;
+		for(i=0;i<RMAPS_MAX;i++) {
+			r = &FTABLE_RMAPS(mfn,i);
+			vr_add_rmap_count(vr, r->rmap_count, i);
+			count += r->rmap_count;
+		}
+		if (test_bit(VR_SHRINK_NORMAP, &vr->flags))	// always non-zero rmaps for this attribute
+			MYASSERT(count);
+#endif
+		vr_inc_frame_count(vr);
+		mfn_chain_add(mfn, vr);
+#ifdef ENABLE_VREGION_MAPPING	// TODO: this is naive implementation.. needs optimization
+		for(i=0;i<MAX_CACHE;i++) {
+			if (!is_vregion_cache_mapped(vr, i)) {
+				close_mfn(mfn, i, NULL, 0);
+			}
+		}
+#endif
+#ifdef ENABLE_REGIONING3
+		if (test_bit(VR_NO_REGIONING, &vr->flags)) {	// entering of no_regioning vr
+			open_mfn(mfn, -1, NULL, 1);
+		}
+#endif
+		if (!(flags & VRT_SET_SKIP_UNLOCK_VR2))		// if SKIP_UNLOCK_VR2 is set, must not spin_lock vr after this point until vr is unlocked at calling func.
+			spin_unlock(&vr->lock);
+	}
+same_vr:
+	//if(vr)
+	//spin_unlock(&biglock);
+
+//	check_cacheman();
+	if (flags & VRT_SET_LOCK_SYNC)
+		spin_unlock(&SYNC_LOCK(mfn));	// end of sync. so now vr has this mfn.
+	
+	if ((flags & VRT_SET_RETURN_OLD) && old) {
+		vr_get(old, VR_REFCNT_VRT_TEMP);
+		vr_put(old, VR_REFCNT_VRT, 0);
+		return old;
+	}
+
+	if (old)
+		vr_put(old, VR_REFCNT_VRT, 2);
+
+	return NULL;
+}
+#endif
+*/
+
+
 
 void vrt_destroy_chunk(unsigned long s, unsigned long e)
 {
