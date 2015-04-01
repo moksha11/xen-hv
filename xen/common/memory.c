@@ -42,6 +42,7 @@ atomic_t disabl_shrink_hotpg;
 
 #define MAX_HOT_MFNS 64000
 #define MAX_HOT_MFNS_GUEST 64000
+#define _USE_SHAREDMEM
 
 
 PAGE_LIST_HEAD(in_hotskip_list);
@@ -145,12 +146,17 @@ int add_hotpage_tolist(struct page_info *page, unsigned int mfn) {
 	//	return 0; 
 
 	//printk("calling add_hotpage_tolist ...1\n");
-	if(atomic_read(&disabl_shrink_hotpg))
-        return 0;
+	//if(atomic_read(&disabl_shrink_hotpg))
+      //  return 0;
 	
 	//failure if return is > 0
 	if(check_if_valid_domain_pg(mfn))
 		return 0;
+
+#ifdef _USE_SHAREDMEM
+	    hsm_add_mfn(mfn, pages_added);
+		return 0;
+#endif
 
 	if(!hotmfns){
 	  size = MAX_HOT_MFNS;	
@@ -160,13 +166,11 @@ int add_hotpage_tolist(struct page_info *page, unsigned int mfn) {
 	}
 
 	idx = 0;
+
  	if(hotmfns){
-		 idx = pages_added % MAX_HOT_MFNS;
-		 //if(hotmfns[idx] == 0) {
-			hotmfns[idx] = mfn; 	
-			pages_added++;
-			//printk("add_hotpage_tolist: adding to hotpage list \n");	
-		//}	
+        idx = pages_added % MAX_HOT_MFNS;
+		hotmfns[idx] = mfn;
+		pages_added++;
     }
 	return 0;
 }
