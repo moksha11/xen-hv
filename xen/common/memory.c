@@ -42,7 +42,7 @@ atomic_t disabl_shrink_hotpg;
 
 #define MAX_HOT_MFNS 256000
 #define MAX_HOT_MFNS_GUEST 256000
-//#define _USE_SHAREDMEM
+#define _USE_SHAREDMEM
 
 
 PAGE_LIST_HEAD(in_hotskip_list);
