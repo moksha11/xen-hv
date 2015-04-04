@@ -22,7 +22,7 @@
 #include <mini.h>
 
 //#define HETERO_SYNC1	// first try
-//#define HETERO_SYNC2
+//define HETERO_SYNC2
 
 #define HETEROMEM2
 
@@ -236,13 +236,13 @@ static int hetero(unsigned int mfn, int add /* 1 for add, 0 for del */)
 
 #endif
 
-#define MAX_SCAN	2048	// scan up to this number of pages..
-#define MAX_TEMP_MFNS	1024
-#define TIME_WINDOW	2000	// in millisec
+//#define MAX_SCAN	8192	// scan up to this number of pages..
+//#define MAX_TEMP_MFNS	4096
+//#define TIME_WINDOW	2000	// in millisec
 
-//#define MAX_SCAN 16384	// scan up to this number of pages..
-//#define MAX_TEMP_MFNS 8192
-//#define TIME_WINDOW 2000	// in millisec
+#define MAX_SCAN 32768	// scan up to this number of pages..
+#define MAX_TEMP_MFNS 16384
+#define TIME_WINDOW 500	// in millisec
 
 
 // vr->lock is held when called.
@@ -356,7 +356,7 @@ static int scan_hot_pages(s_time_t now, struct vregion_t *vr, unsigned int *mfns
 	int within_limit;
 #endif
 
-    hsm_reset_idx();
+    //hsm_reset_idx();
 
 	do {
 	frame_count++;
@@ -460,14 +460,13 @@ void shrink_hot_pages(s_time_t now)
 	}
 
 #ifdef HETERO_SYNC1
-	spin_unlock(&hetero_lock);
+		spin_unlock(&hetero_lock);
 #endif
-	flush_tlb_local();	// TODO: or global? where is correct location?a
+		flush_tlb_local();	// TODO: or global? where is correct location?a
 	}
 #endif
 
 	//hsm_add_mfn(0, 0);
-
 	spin_unlock(&seed_user_hot->lock);	// TODO determine where this goes..
 
 	for(i=0;i<ret;i++) {

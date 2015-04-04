@@ -40,9 +40,9 @@ static unsigned int guest_startidx;
 static unsigned int guest_stopidx;
 atomic_t disabl_shrink_hotpg;
 
-#define MAX_HOT_MFNS 64000
-#define MAX_HOT_MFNS_GUEST 64000
-#define _USE_SHAREDMEM
+#define MAX_HOT_MFNS 256000
+#define MAX_HOT_MFNS_GUEST 256000
+//#define _USE_SHAREDMEM
 
 
 PAGE_LIST_HEAD(in_hotskip_list);
@@ -146,8 +146,8 @@ int add_hotpage_tolist(struct page_info *page, unsigned int mfn) {
 	//	return 0; 
 
 	//printk("calling add_hotpage_tolist ...1\n");
-	//if(atomic_read(&disabl_shrink_hotpg))
-      //  return 0;
+	if(atomic_read(&disabl_shrink_hotpg))
+        return 0;
 	
 	//failure if return is > 0
 	if(check_if_valid_domain_pg(mfn))
@@ -155,6 +155,7 @@ int add_hotpage_tolist(struct page_info *page, unsigned int mfn) {
 
 #ifdef _USE_SHAREDMEM
 	    hsm_add_mfn(mfn, pages_added);
+		pages_added++;
 		return 0;
 #endif
 
@@ -164,8 +165,6 @@ int add_hotpage_tolist(struct page_info *page, unsigned int mfn) {
 	  if(!hotmfns)	
 		printk("add_hotpage_tolist: hotmfns allocation failed \n");
 	}
-
-	idx = 0;
 
  	if(hotmfns){
         idx = pages_added % MAX_HOT_MFNS;
@@ -182,7 +181,26 @@ static void hetero_get_hotpage(struct memop_args *a, struct xen_hetero_memory_re
     unsigned int i=0, idx=0, j=0, itr=0;
     xen_pfn_t gpfn, mfn;
 
-	if(!hotmfns) return;
+#ifdef _USE_SHAREDMEM
+	if(atomic_read(&disabl_shrink_hotpg)) {
+		//pages_added=0;
+		//hsm_add_mfn(0,0);
+		hsm_reset_idx();
+   		atomic_set(&disabl_shrink_hotpg, 0);
+	}
+	else{
+		atomic_set(&disabl_shrink_hotpg, 1);	
+		hsm_add_mfn(0,pages_added);
+	}
+	a->nr_done = 0;
+	return;
+#else
+	atomic_set(&disabl_shrink_hotpg, 1);
+#endif
+
+	if(!hotmfns){
+	  goto out;
+	}
 
 	i=0;
 	a->nr_done = i;
@@ -193,8 +211,7 @@ static void hetero_get_hotpage(struct memop_args *a, struct xen_hetero_memory_re
 	if(guest_stopidx > pages_added)
 		guest_stopidx = pages_added;
 
-	 atomic_set(&disabl_shrink_hotpg, 1);
-
+	 //atomic_set(&disabl_shrink_hotpg, 1);
 	 for(idx=guest_startidx; idx< guest_stopidx; idx++) {
 
 		if ( !guest_handle_is_null(a->extent_list) ){
@@ -207,7 +224,6 @@ static void hetero_get_hotpage(struct memop_args *a, struct xen_hetero_memory_re
 			 	//					mfn, hotmfns[idx]);
 				continue;
 			 }
-	
 			 //gpfn = get_gpfn_from_mfn(mfn);
 			 //printk("hetero_get_hotpage: hotmfns[%u]:%u, gpfn %u\n",     
              //		idx, hotmfns[idx], get_gpfn_from_mfn(hotmfns[idx]));
@@ -217,13 +233,12 @@ static void hetero_get_hotpage(struct memop_args *a, struct xen_hetero_memory_re
 			//hotmfns[idx]=0;
 		}
     }
-	//printk("hetero_get_hotpage:start idx %u, end idx %u\n",
-	//			guest_startidx, guest_stopidx);
+	printk("hetero_get_hotpage:start idx %u, end idx %u\n",
+				guest_startidx, guest_stopidx);
 	//guest_startidx = (guest_startidx + idx + 1)% MAX_HOT_MFNS;
 	guest_startidx = (guest_stopidx + 1)% MAX_HOT_MFNS;
 
 out:
-
 	/*reset pages to 0*/
 	pages_added = 0;
 
@@ -1123,9 +1138,9 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE(void) arg)
         break;
     }
 
-	/*if (op == XENMEM_hetero_populate_physmap || op == XENMEM_hetero_stop_hotpage_scan) {
-		printk("do_memory_op: hypercall returns %u\n", rc);
-	}*/
+	//if (op == XENMEM_hetero_populate_physmap || op == XENMEM_hetero_stop_hotpage_scan) {
+	//	printk("do_memory_op: hypercall returns %u\n", rc);
+	//}
 
     return rc;
 }

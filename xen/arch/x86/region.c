@@ -212,7 +212,7 @@ struct vregion_t *get_seed_xen(void)	// TODO: refcnt on return value? probably I
 
 //#ifndef SUD_DISABLE_SPINLOCK	 
 //ORIGINAL CODE
-#if 0
+#if 1
 struct vregion_t *vrt_set(unsigned long mfn, struct vregion_t *vr, int flags)
 {
 	int i;
@@ -439,8 +439,6 @@ struct vregion_t *vrt_set(unsigned long mfn, struct vregion_t *vr, int flags)
 	struct rmaps_builtin *r;
 	int maybe_same = flags & VRT_SET_MAYBE_SAME;
 
-	//spin_lock(&biglock);
-
 	if (!was_null && !vr) {
 #ifdef ENABLE_RMAP
 		// speculative peek without holding lock. we need check it again below.
@@ -460,26 +458,32 @@ struct vregion_t *vrt_set(unsigned long mfn, struct vregion_t *vr, int flags)
 		was_null = 1;
 	}
 
-	//if(vr)
-	//spin_lock(&biglock);
-
 #ifdef DEBUG_ASSERT
 	if (vr && vr < (struct vregion_t *)VRT_MASK) mypanic("vrt_set: vr && vr < VRT_MASK");
 #endif
 	mfn_check(mfn);
 
+
 	struct vregion_t *old;
+
+
+#if 0
 	if (flags & VRT_SET_LOCK_SYNC) {
 		myspin_lock(&SYNC_LOCK(mfn), 44);
 	}
 	MYASSERT(spin_is_locked(&SYNC_LOCK(mfn)));
+#endif
+
+
 	old = _vrt_set(mfn, vr);
+
 #ifdef DEBUG_ASSERT
 	if (flags & VRT_SET_INIT) {
 		MYASSERT(!old);
 	} else
 		MYASSERT(old);
 #endif
+
 	// here _vrt_set() was successful, vr_get() was called already.
 	if ( old == vr )
 	{
@@ -492,6 +496,7 @@ struct vregion_t *vrt_set(unsigned long mfn, struct vregion_t *vr, int flags)
 		print_vregion(vr, 0);
 		mypanic("WARN Unnecessary vrt_set..Set to same vr??\n");
 	}
+
 
 	// if parent==NULL, clear abit_history
 	if ( old ) {
@@ -552,6 +557,7 @@ if (!(was_null 						// xx --> seed
 #endif
 		spin_unlock(&old->lock);
 	}
+
 //	MYASSERT( FTABLE_NEXT(mfn) == -1 && FTABLE_PREV(mfn) == -1 );
 	if (vr) {
 #if 1
@@ -570,7 +576,9 @@ if (!(was_null 						// xx --> seed
 			
 		}
 #endif
+
 		myspin_lock(&vr->lock, 99);
+
 #ifdef ENABLE_HISTOGRAM
 		vr_inc_density(vr, bitcount(FTABLE_ABIT(mfn)), 0);
 #endif
@@ -634,8 +642,12 @@ same_vr:
 	//spin_unlock(&biglock);
 
 //	check_cacheman();
+
+#if 0
 	if (flags & VRT_SET_LOCK_SYNC)
 		spin_unlock(&SYNC_LOCK(mfn));	// end of sync. so now vr has this mfn.
+#endif
+
 	
 	if ((flags & VRT_SET_RETURN_OLD) && old) {
 		vr_get(old, VR_REFCNT_VRT_TEMP);
