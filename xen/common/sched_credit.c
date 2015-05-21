@@ -45,7 +45,7 @@
 /*
  * Basic constants
  */
-#define SHRINK_FREQ 5	
+#define SHRINK_FREQ 10
 #define CSCHED_DEFAULT_WEIGHT       256
 #define CSCHED_TICKS_PER_TSLICE     3
 #define CSCHED_TICKS_PER_ACCT       3
@@ -1990,8 +1990,10 @@ void pcpu_stat(void) {}
 int strategy_point(s_time_t now, int num)
 {
 	s_time_t cosched = this_cpu(cosched_flagtime);
+
 	if (!cosched)
 		return 0;
+
 	if (!mini_activated) {
 		clear_flagtime();
 		return 0;
@@ -2075,16 +2077,19 @@ csched_tick(void *_cpu)
 #ifdef ENABLE_HOT_PAGES
 	if ( (spc->tick % SHRINK_FREQ ) == 0 ) {	// 100ms
 		s_time_t now = NOW();
+		//printk("Disabled shrink_hot_pages(now) \n");
 		shrink_hot_pages(now);
 	}
 #endif
 #ifdef ENABLE_CACHE_BALANCE
 	if ( (spc->tick % 10 ) == 0 ) {	// 100ms
+		printk("Calling do_balance \n");
 		do_balance(0);
 	}
 #endif
 #ifdef ENABLE_BINPACKING_PRINTX
 	if ( (spc->tick % 3 ) == 0 ) {	// 30ms
+		printk("Calling ENABLE_BINPACKING_PRINTX \n");
 		printx_pcpu(NOW());
 	}
 #endif
@@ -2105,6 +2110,7 @@ csched_tick(void *_cpu)
 		do_clock(CLOCK_EVENT_TIMER, current->current_pgd, NOW());
 		atomic_dec(&mini_place[10]);
 		atomic_dec(&mini_count);
+		//printk("Calling ENABLE_CLOCK \n");
 	}
 #endif
 
@@ -2112,12 +2118,14 @@ csched_tick(void *_cpu)
 	// strategy point #2 - tick
 	if (strategy_point(NOW(), 2))
 		clear_flagtime();
+	printk("Calling ENABLE_BINPACKING \n");
 #endif
 
 #ifdef ENABLE_PER_CACHE_PT
 	if (mini_activated && current->current_pgd) {
 		MYASSERT(cr3_is_shadow(0));
 	}
+	//printk("Calling ENABLE_PER_CACHE_PT \n");
 #endif
 #endif
 

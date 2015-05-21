@@ -156,6 +156,7 @@ int add_hotpage_tolist(struct page_info *page, unsigned int mfn) {
 #ifdef _USE_SHAREDMEM
 	    hsm_add_mfn(mfn, pages_added);
 		pages_added++;
+		//printk("add_hotpage_tolist: hotmfns %u \n",pages_added);
 		return 0;
 #endif
 
@@ -185,7 +186,7 @@ static void hetero_get_hotpage(struct memop_args *a, struct xen_hetero_memory_re
 	if(atomic_read(&disabl_shrink_hotpg)) {
 		//pages_added=0;
 		//hsm_add_mfn(0,0);
-		hsm_reset_idx();
+		//hsm_reset_idx();
    		atomic_set(&disabl_shrink_hotpg, 0);
 	}
 	else{

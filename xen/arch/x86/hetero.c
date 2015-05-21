@@ -62,8 +62,10 @@ void hetero_initialize(void)
 	atomic_set(&hetero_pages_count, 0);
 	for(i=0;i<MAX_HETERO_VM;i++) {
 		atomic_set(&hetero_pages_vm[i], 0);
+#ifdef ENABLE_HETERO
 		hetero_pages_vm_limit[i] = 0;	// initially no limit
 		hetero_pages_vm_expect[i] = 0;
+#endif
 		vm_tot_pages[i] = 0;
 		atomic_set(&hot_pages_vm[i], 0);
 	}
@@ -91,6 +93,7 @@ TODO		atomic_dec(&hetero_pages_vm); or vm_limit
 }
 */
 
+#ifdef ENABLE_HETERO
 int less_than_limit(int mfn)
 {
 		struct domain *vm = page_get_owner(__mfn_to_page(mfn));
@@ -118,6 +121,7 @@ int less_than_limit(int mfn)
 		}
 		return 0;
 }
+#endif
 
 // vr->lock is held when called.
 static int hetero(unsigned int mfn, int add /* 1 for add, 0 for del */)
@@ -236,13 +240,13 @@ static int hetero(unsigned int mfn, int add /* 1 for add, 0 for del */)
 
 #endif
 
-//#define MAX_SCAN	8192	// scan up to this number of pages..
-//#define MAX_TEMP_MFNS	4096
-//#define TIME_WINDOW	2000	// in millisec
+#define MAX_SCAN	8192	// scan up to this number of pages..
+#define MAX_TEMP_MFNS	4096
+#define TIME_WINDOW	500	// in millisec
 
-#define MAX_SCAN 32768	// scan up to this number of pages..
-#define MAX_TEMP_MFNS 16384
-#define TIME_WINDOW 500	// in millisec
+//#define MAX_SCAN 32768	// scan up to this number of pages..
+//#define MAX_TEMP_MFNS 16384
+//#define TIME_WINDOW 10000	// in millisec
 
 
 // vr->lock is held when called.
@@ -361,7 +365,10 @@ static int scan_hot_pages(s_time_t now, struct vregion_t *vr, unsigned int *mfns
 	do {
 	frame_count++;
 	time = ((unsigned long)FTABLE_TIME(cur) << 20);
+
+#ifdef ENABLE_HETERO
 	within_limit = less_than_limit(cur);
+#endif
 	// TODO: refcnt?
 	if (time + MILLISECS(TIME_WINDOW) < now) {
 		flag[ret] = 0;
@@ -419,7 +426,9 @@ void shrink_hot_pages(s_time_t now)
 
 #ifdef HETERO_PAGE_VM_LIMITS
 	for(i=0;i<MAX_HETERO_VM;i++) {
+#ifdef ENABLE_HETERO
 		hetero_pages_vm_expect[i] = 0;
+#endif
 	}
 #endif
 	myspin_lock(&seed_user_hot->lock, 29);
@@ -485,6 +494,7 @@ void shrink_hot_pages(s_time_t now)
 		FTABLE_TIME(mfns[i]) = 0;
 		FTABLE_ABIT(mfns[i]) = 0;
 	}
+	//hsm_add_mfn(0, 0);
 }
 
 
@@ -499,7 +509,9 @@ void shrink_hot_pages_old(s_time_t now)
 
 #ifdef HETERO_PAGE_VM_LIMITS
 	for(i=0;i<MAX_HETERO_VM;i++) {
+#ifdef ENABLE_HETERO
 		hetero_pages_vm_expect[i] = 0;
+#endif
 	}
 #endif
 	myspin_lock(&seed_user_hot->lock, 29);
@@ -531,7 +543,7 @@ void shrink_hot_pages_old(s_time_t now)
 	}
 #endif
 
-    hsm_add_mfn(0, 0);
+    //hsm_add_mfn(0, 0);
 	spin_unlock(&seed_user_hot->lock);	// TODO determine where this goes..
 
 	for(i=0;i<ret;i++) {
@@ -569,7 +581,9 @@ void shrink_hot_pages_working(s_time_t now)
 
 #ifdef HETERO_PAGE_VM_LIMITS
 	for(i=0;i<MAX_HETERO_VM;i++) {
+#ifdef ENABLE_HETERO
 		hetero_pages_vm_expect[i] = 0;
+#endif
 	}
 #endif
 	myspin_lock(&seed_user_hot->lock, 29);

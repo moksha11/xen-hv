@@ -105,7 +105,7 @@ static void setup_page(void *addr_page)
         return;
     }
 
-    printk("setup_page\n");
+    //printk("setup_page\n");
 
     for (fidx = 0; fidx < frames_ppage; ++fidx)
     {
@@ -128,7 +128,7 @@ static void *get_new_page(void)
     clear_page(addr_new_page);
     share_xen_page_with_guest(virt_to_page(addr_new_page), current->domain, XENSHARE_writable);
 
-    printk("new page base addr = %p\n", addr_new_page);
+    //printk("new page base addr = %p\n", addr_new_page);
 
     return addr_new_page; 
 }
