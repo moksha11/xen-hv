@@ -1012,7 +1012,10 @@ void system_wide_destroy(void)
 	if (vregions_xmalloc_count)
 		myprintk("WARN! Due to empty vregions_free,called xmalloc %d times. Increase pool size!\n", vregions_xmalloc_count);
 #endif
+
+#ifdef ENABLE_TRACK_MEMLEAK
 	memleak_report();
+#endif
 	myprintk("end of system_wide_destroy\n");
 }
 

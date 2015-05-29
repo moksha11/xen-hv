@@ -1482,7 +1482,11 @@ static void _mykeyhandler_space(unsigned char key)
 	print_config();
 	print_pgds(0);
 	print_all_vregions();
+
+#ifdef ENABLE_TRACK_MEMLEAK
 	memleak_report();
+#endif
+
 #ifdef ENABLE_GUEST_REGION
 	print_grt();
 #endif

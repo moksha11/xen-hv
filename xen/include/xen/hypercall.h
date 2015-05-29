@@ -151,6 +151,10 @@ do_hsm_get_mfn(XEN_GUEST_HANDLE(uint64_t) mfn);
 extern long
 do_hsm_free_mfn(uint64_t mfn);
 
+//extern long
+//do_get_hwcntrs(XEN_GUEST_HANDLE(void) arg);
+
+
 extern int
 do_xenoprof_op(int op, XEN_GUEST_HANDLE(void) arg);
 

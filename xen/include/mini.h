@@ -15,6 +15,10 @@
 #error Not-supported.
 #endif
 
+
+//#define PERF_MON
+//#define MY_PERF_MON_INIT
+
 #define MAX_PROC	32	//4
 #define MAX_CACHE	4	// Also check vr->flag's cachemap (VR_XXX_BASE) and proc2intcache[] and cache2cpumask[]
 DECLARE_PER_CPU(s_time_t, cosched_flagtime);
@@ -26,9 +30,9 @@ DECLARE_PER_CPU(unsigned long, locked_pt_loc);
 //#define SUD_DISABLE_SPINLOCK
 
 //#define DEBUG_STAT
-#define ENABLE_TRACK_SPINLOCK
-#define ENABLE_TRACK_MEMLEAK
-#define ENABLE_MYXTRACE
+//#define ENABLE_TRACK_SPINLOCK
+//#define ENABLE_TRACK_MEMLEAK
+//#define ENABLE_MYXTRACE
 #define ENABLE_RECORD
 /*
 #define ENABLE_SEPARATE_LIST

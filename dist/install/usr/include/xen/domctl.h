@@ -701,6 +701,14 @@ struct xen_domctl_gdbsx_domstatus {
     uint32_t         vcpu_ev;    /* if yes, what event? */
 };
 
+
+/* XEN_DOMCTL_getvcpuctrs */
+struct xen_domctl_getvcpuctrs{
+    uint8_t          temp;     /*temp delete it*/
+};
+
+
+
 /*
  * Memory event operations
  */
@@ -897,6 +905,8 @@ struct xen_domctl {
 #define XEN_DOMCTL_gdbsx_pausevcpu             1001
 #define XEN_DOMCTL_gdbsx_unpausevcpu           1002
 #define XEN_DOMCTL_gdbsx_domstatus             1003
+#define XEN_DOMCTL_getvcpuctrs		       1004 /*PERFMON, not adding a ifdef here*/
+	
     uint32_t interface_version; /* XEN_DOMCTL_INTERFACE_VERSION */
     domid_t  domain;
     union {
@@ -949,6 +959,7 @@ struct xen_domctl {
         struct xen_domctl_gdbsx_memio       gdbsx_guest_memio;
         struct xen_domctl_gdbsx_pauseunp_vcpu gdbsx_pauseunp_vcpu;
         struct xen_domctl_gdbsx_domstatus   gdbsx_domstatus;
+	struct xen_domctl_getvcpuctrs	    getvcpuctrs; /*PERFMON CHANGES*/						
         uint8_t                             pad[128];
     } u;
 };

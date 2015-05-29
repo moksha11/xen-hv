@@ -270,7 +270,7 @@ void update_counters_cpu(void *data)
 	__get_cpu_var(dlmisses) = d_pctr0;
 	__get_cpu_var(drmisses) = d_pctr1;
 
-	if(hetero_debug_level >= 3)
-			printk("cpu %d tsc %ld mperf %ld inst %ld cycle %ld pctr0 %ld pctr1 %ld\n",cpu,d_tsc/1000,d_mperf/1000,d_retired/1000,d_unhalted/1000,d_pctr0/1000,d_pctr1/1000);
+	//if(hetero_debug_level >= 3)
+	//printk("cpu %d tsc %ld mperf %ld inst %ld cycle %ld pctr0 %ld pctr1 %ld\n",cpu,d_tsc/1000,d_mperf/1000,d_retired/1000,d_unhalted/1000,d_pctr0/1000,d_pctr1/1000);
 	preempt_enable();
 }

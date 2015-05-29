@@ -12,6 +12,7 @@
 #include <xen/softirq.h>
 #include <xen/time.h>
 #include <xen/errno.h>
+#include <mini.h>
 
 /*verbosity settings*/
 #define SEDFLEVEL 0
@@ -330,8 +331,11 @@ static inline void __add_to_runqueue_sort(struct vcpu *v)
     list_insert_sort(RUNQ(v->processor), LIST(v), runq_comp);
 }
 
-
+#ifdef PERF_MON
+static void *sedf_alloc_vdata(const struct scheduler *ops, struct vcpu *v, void *dd, int mon_enable)
+#else
 static void *sedf_alloc_vdata(const struct scheduler *ops, struct vcpu *v, void *dd)
+#endif
 {
     struct sedf_vcpu_info *inf;
 

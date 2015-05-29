@@ -25,6 +25,7 @@
 #include <xen/errno.h>
 #include <xen/trace.h>
 #include <xen/cpu.h>
+#include <mini.h>
 
 #if __i386__
 #define PRI_stime "lld"
@@ -726,8 +727,13 @@ __csched_vcpu_check(struct vcpu *vc)
 #define CSCHED_VCPU_CHECK(_vc)
 #endif
 
+#ifdef PERF_MON
+static void *
+csched_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd, int mon_enable)
+#else
 static void *
 csched_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
+#endif
 {
     struct csched_vcpu *svc;
 

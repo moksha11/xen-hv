@@ -34,8 +34,8 @@
 #include <asm/setup.h>
 #include <asm/bzimage.h> /* for bzimage_parse */
 #include <asm/io_apic.h>
-
 #include <public/version.h>
+
 
 static long __initdata dom0_nrpages;
 static long __initdata dom0_min_nrpages;
@@ -96,8 +96,11 @@ struct vcpu *__init alloc_dom0_vcpu0(void)
         return NULL;
     memset(dom0->vcpu, 0, opt_dom0_max_vcpus * sizeof(*dom0->vcpu));
     dom0->max_vcpus = opt_dom0_max_vcpus;
-
+#ifdef PERF_MON
+    return alloc_vcpu(dom0, 0, 0,0);
+#else
     return alloc_vcpu(dom0, 0, 0);
+#endif
 }
 
 static bool_t __initdata opt_dom0_shadow;
@@ -880,7 +883,11 @@ int __init construct_dom0(
     for ( i = 1; i < opt_dom0_max_vcpus; i++ )
     {
         cpu = cycle_cpu(cpu, cpupool0->cpu_valid);
+#ifdef PERF_MON
+	(void)alloc_vcpu(d, i, cpu,0);
+#else
         (void)alloc_vcpu(d, i, cpu);
+#endif
     }
 
     /* Set up CR3 value for write_ptbase */

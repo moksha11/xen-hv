@@ -248,6 +248,10 @@ struct domain
     /* Scheduling. */
     void            *sched_priv;    /* scheduler-specific data */
     struct cpupool  *cpupool;
+#ifdef PERF_MON
+    int             mon_enable;
+#endif
+
 
     struct domain   *next_in_list;
     struct domain   *next_in_hashbucket;
@@ -315,7 +319,9 @@ struct domain
     atomic_t         refcnt;
 
     struct vcpu    **vcpu;
-
+#ifdef PERF_MON
+    uint64_t  **sum; //sums of all vcpu counters
+#endif
     /* Bitmask of CPUs which are holding onto this domain's state. */
     cpumask_t        domain_dirty_cpumask;
 
@@ -529,7 +535,11 @@ void __domain_crash_synchronous(void) __attribute__((noreturn));
 
 #define set_current_state(_s) do { current->state = (_s); } while (0)
 void scheduler_init(void);
+#ifdef PERF_MON
+int  sched_init_vcpu(struct vcpu *v, unsigned int processor, int mon_enable);
+#else
 int  sched_init_vcpu(struct vcpu *v, unsigned int processor);
+#endif
 void sched_destroy_vcpu(struct vcpu *v);
 int  sched_init_domain(struct domain *d);
 void sched_destroy_domain(struct domain *d);

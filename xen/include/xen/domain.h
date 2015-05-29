@@ -4,6 +4,7 @@
 
 #include <public/xen.h>
 #include <asm/domain.h>
+#include <mini.h>
 
 typedef union {
     struct vcpu_guest_context *nat;
@@ -11,7 +12,12 @@ typedef union {
 } vcpu_guest_context_u __attribute__((__transparent_union__));
 
 struct vcpu *alloc_vcpu(
-    struct domain *d, unsigned int vcpu_id, unsigned int cpu_id);
+#ifdef PERF_MON
+struct domain *d, unsigned int vcpu_id, unsigned int cpu_id, int mon_enable);
+#else
+struct domain *d, unsigned int vcpu_id, unsigned int cpu_id);
+#endif
+
 int boot_vcpu(
     struct domain *d, int vcpuid, vcpu_guest_context_u ctxt);
 struct vcpu *alloc_dom0_vcpu0(void);

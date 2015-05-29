@@ -25,6 +25,10 @@
 #include <asm/current.h>
 #include <public/domctl.h>
 #include <xsm/xsm.h>
+#include <mini.h>
+#ifdef PERF_MON
+#define NUM_CTRS 4
+#endif
 
 static DEFINE_SPINLOCK(domctl_lock);
 
@@ -456,6 +460,9 @@ long do_domctl(XEN_GUEST_HANDLE(xen_domctl_t) u_domctl)
         struct domain *d;
         unsigned int i, max = op->u.max_vcpus.max, cpu;
         cpumask_t *online;
+#ifdef PERF_MON
+        int mon_enable = 1;
+#endif
 
         ret = -ESRCH;
         if ( (d = rcu_lock_domain_by_id(op->domain)) == NULL )
@@ -502,9 +509,16 @@ long do_domctl(XEN_GUEST_HANDLE(xen_domctl_t) u_domctl)
         ret = -EBUSY;
         if ( (d->max_vcpus > 0) && (max > d->max_vcpus) )
             goto maxvcpu_out;
+#ifdef PERF_MON
+		d->mon_enable = mon_enable;
+#endif
 
         ret = -ENOMEM;
         online = (d->cpupool == NULL) ? &cpu_online_map : &d->cpupool->cpu_valid;
+#ifdef PERF_MON
+        if(d->cpupool != NULL)
+          printk("cpupool ID = %d, domain ID = %d, max_vcpus = %d, max = %d\n", d->cpupool->cpupool_id, d->domain_id, d->max_vcpus, max );
+#endif
         if ( max > d->max_vcpus )
         {
             struct vcpu **vcpus;
@@ -512,6 +526,14 @@ long do_domctl(XEN_GUEST_HANDLE(xen_domctl_t) u_domctl)
             BUG_ON(d->vcpu != NULL);
             BUG_ON(d->max_vcpus != 0);
 
+#ifdef PERF_MON
+            d->sum = (uint64_t **)xmalloc_array(uint64_t *, max);
+            memset(d->sum, 0, max * sizeof(uint64_t *));
+            for (i = 0; i < max; i++) {
+                d->sum[i] = (uint64_t *)xmalloc_array(uint64_t, NUM_CTRS);
+                memset(d->sum[i], 0, sizeof(uint64_t) * NUM_CTRS);
+            }
+#endif
             if ( (vcpus = xmalloc_array(struct vcpu *, max)) == NULL )
                 goto maxvcpu_out;
             memset(vcpus, 0, max * sizeof(*vcpus));
@@ -530,8 +552,12 @@ long do_domctl(XEN_GUEST_HANDLE(xen_domctl_t) u_domctl)
             cpu = (i == 0) ?
                 default_vcpu0_location(online) :
                 cycle_cpu(d->vcpu[i-1]->processor, *online);
-
+#ifdef PERF_MON
+            printk("Allocating domain %d vcpu %d on cpu %d\n", d->domain_id, i, cpu);
+            if ( alloc_vcpu(d, i, cpu, mon_enable) == NULL )
+#else
             if ( alloc_vcpu(d, i, cpu) == NULL )
+#endif
                 goto maxvcpu_out;
         }
 
@@ -618,6 +644,31 @@ long do_domctl(XEN_GUEST_HANDLE(xen_domctl_t) u_domctl)
     }
     break;
 
+#ifdef PERF_MON
+    case XEN_DOMCTL_getvcpuctrs:
+    {
+        struct domain *d;
+        int i = 0;
+        ret = -ESRCH;
+        if ( (d = rcu_lock_domain_by_id(op->domain)) == NULL )
+           break;
+        
+        ret = sched_vcpu_readctrs(d);
+        // copy d->sum one by one using guest offset into guest memory.
+        // reference implementation: XEN_DOMCTL_getmemlist
+
+        for (i = 0; i < d->max_vcpus; i++)
+        {
+//           if (copy_to_guest_offset((op->u.vcpuctrs.ctrsptr + (i*sizeof(uint64_t)*NUM_CTRS)), 0, d->sum[i], sizeof(uint64_t)*NUM_CTRS))
+           //if (copy_to_guest_offset(op->u.vcpuctrs.ctrsptr, i*NUM_CTRS, d->sum[i], sizeof(uint64_t)*NUM_CTRS))
+             //ret = -EFAULT; 
+        }
+
+        rcu_unlock_domain(d);
+
+    }
+    break;
+#endif
     case XEN_DOMCTL_getdomaininfo:
     { 
         struct domain *d;

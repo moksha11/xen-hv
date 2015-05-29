@@ -25,6 +25,9 @@
 #include <mini.h>
 #include <xen/heterovisor.h>
 #include <xen/guest_access.h>
+#ifdef PERF_MON
+#include<public/xenoprof.h>
+#endif
 
 #define HETEROPERF
 
@@ -114,6 +117,20 @@
 
 #endif /* CSCHED_STATS */
 
+#ifdef PERF_MON
+typedef struct ctr_info {
+   uint64_t myreadmsr;
+   uint64_t current2;
+   uint64_t sum;
+   uint64_t last_value;
+   unsigned int tot_hist_size;
+   unsigned int historyindex;
+   uint64_t *historyctrs; 
+}ctr_info_t;
+
+//typedef struct ctr_info ctr_info_t; 
+#endif
+
 #ifdef HETERO_VISOR
 cpumask_t bigcore_mask, smallcore_mask;
 uint16_t hetero_nb_cores=0, hetero_ns_cores=0;
@@ -194,6 +211,11 @@ struct csched_vcpu {
         uint32_t migrate_r;
     } stats;
 #endif
+
+#ifdef PERF_MON
+     ctr_info_t **perf_ctrs;
+#endif
+
 #ifdef ENABLE_BINPACKING
 	s_time_t last_passed;	// in nano sec
 	long diff_passed;
@@ -268,8 +290,24 @@ struct csched_private {
 #endif
 };
 
+#ifdef PERF_MON
+   #define HMC_IA32_PMC0 0xc1
+   #define HMC_IA32_PMC1 0xc2
+   #define HMC_IA32_PMC2 0xc3
+   #define HMC_IA32_PMC3 0xc4
+   
+uint64_t perf_mon_events[] = {HMC_IA32_PMC0, HMC_IA32_PMC1, HMC_IA32_PMC2, HMC_IA32_PMC3};
+//extern int do_hmc_xenoprof_op(int op, void *arg);
+extern int do_xenoprof_op(int op, void *arg);
+extern void test_counter_values(void);
+#endif
+
 static void csched_tick(void *_cpu);
 static void csched_acct(void *dummy);
+
+static inline int do_hmc_xenoprof_op(int op, void *arg){
+  return do_xenoprof_op(op, arg);
+}
 
 static inline int
 __vcpu_on_runq(struct csched_vcpu *svc)
@@ -844,8 +882,188 @@ csched_vcpu_acct(struct csched_private *prv, unsigned int cpu)
     }
 }
 
+#ifdef PERF_MON
+#define DEFAULT_HIST_SIZE 32
+#define NUM_CTRS 4
+#define MAX_COUNTER_VALUE 0xffffffffffffffff
+
+void csched_vcpu_readctrs(const struct scheduler *ops, struct vcpu *vc, uint64_t *sumctrs)
+{
+   struct csched_vcpu *svc = vc->sched_priv;
+   int num_pcpus = num_present_cpus();
+   int pcpu, i;
+   struct ctr_info *ci = NULL;
+   for (i = 0; i < NUM_CTRS; i++) {
+      sumctrs[i] = 0;
+   }
+   for (pcpu = 0 ; pcpu < num_pcpus; pcpu++)
+   {
+        for (i = 0; i < NUM_CTRS; i++) {
+           ci = &svc->perf_ctrs[pcpu][i];
+           sumctrs[i] += ci->sum;
+        }
+   }
+
+}
+
+
+uint64_t csched_read_counter_rdmsr(uint64_t msr)                                                          
+{       
+        uint64_t val;
+       // if (unlikely(inited == 0))
+         //       return 0;
+        rdmsrl(msr, val);
+                
+        return val;                                                   
+}       
+
+
+static int
+csched_vcpu_monitoring_init(struct csched_vcpu *svc)
+{
+    int num_pcpus = num_present_cpus();
+    int i = 0, j = 0, ret = 0, num_ctrs=NUM_CTRS;
+    struct ctr_info *ci = NULL;
+
+    printk("csched_vcpu_monitoring_init, %d %d\n", num_pcpus, NUM_CTRS);    
+    //svc->sum = (uint64_t *)xmalloc_array((uint64_t), num_ctrs);
+    //memset(svc->sum, 0, sizeof(uint64_t) * num_ctrs);
+    svc->perf_ctrs = (ctr_info_t **)xmalloc_array(struct ctr_info*, num_pcpus);
+    if (svc->perf_ctrs == NULL) {
+       ret = 1;
+       goto alloc_fail;
+    }
+    memset(svc->perf_ctrs, 0, sizeof(struct ctr_info *) * num_pcpus);
+    for (i = 0; i < num_pcpus; i++) {
+       svc->perf_ctrs[i] = (ctr_info_t *)xmalloc_array(struct ctr_info, num_ctrs);
+       if (svc->perf_ctrs[i] == NULL) {
+          ret = 2;
+          goto alloc_fail;
+       }
+       memset(svc->perf_ctrs[i], 0, sizeof(struct ctr_info) * num_ctrs);
+       //initialize per-cpu counters
+       for (j = 0; j < num_ctrs; j++) {
+          ci = &svc->perf_ctrs[i][j];
+          ci->myreadmsr = perf_mon_events[j];
+          ci->current2 = 0;
+          ci->sum = 0;
+          ci->tot_hist_size = DEFAULT_HIST_SIZE;
+          ci->historyindex = 0;
+          ci->historyctrs = (uint64_t *)xmalloc_array(uint64_t, ci->tot_hist_size);
+          if (ci->historyctrs == NULL) { 
+             ret = 3;
+             goto alloc_fail;
+          }
+          memset(ci->historyctrs, 0, sizeof(uint64_t) * ci->tot_hist_size);
+       }
+    }
+    printk("csched_vcpu_monitoring_init.. ret: %d\n", ret);
+    return ret;
+    // handle freeing memory in case of allocation failure
+    alloc_fail:
+    switch(ret) {
+       case 3:
+           for(i =0; i < num_pcpus; i++) {
+              if(svc->perf_ctrs[i] != NULL) {
+                 for(j = 0; j < num_ctrs; j++) {
+                    ci = &svc->perf_ctrs[i][j];
+                    if (ci->historyctrs != NULL)
+                       xfree(ci->historyctrs);
+                 }
+                 xfree(svc->perf_ctrs[i]);
+              }
+           }
+       xfree(svc->perf_ctrs);
+       break;
+       case 2:
+           for (i = 0; i < num_pcpus; i++) {
+              if (svc->perf_ctrs[i] != NULL) {
+                for (j = 0; j < num_ctrs; j++) {
+                    ci = &svc->perf_ctrs[i][j];
+                    xfree(ci->historyctrs);   
+                }
+                xfree(svc->perf_ctrs[i]);
+              }
+           } 
+        xfree(svc->perf_ctrs);
+        break;
+        case 1:
+        break;
+    }
+    //xfree(svc->sum);
+    return ret;
+       
+}
+/*
+static void
+csched_move_mondata(const struct scheduler *ops, struct csched_vcpu *oldvc, struct csched_vcpu *newvc)
+{
+   if(oldvc->perf_ctrs!=NULL) 
+   {
+       newvc->perf_ctrs = oldvc->perf_ctrs;
+   }
+}
+*/
+uint64_t csched_add_new_element_to_hist(ctr_info_t *ci, 
+		uint64_t newdelta)
+{
+		
+	ci->sum -= ci->historyctrs[ci->historyindex];
+        ci->historyctrs[ci->historyindex] = newdelta; 
+	ci->sum += ci->historyctrs[ci->historyindex];
+	ci->historyindex = (ci->historyindex + 1) % ci->tot_hist_size;
+
+	return ci->sum;
+}
+
+int csched_vcpu_monitoring_start(struct csched_vcpu *svc, int pcpu)
+{
+        int i;
+        ctr_info_t *ci;
+        if (unlikely(svc == NULL))
+                return -1;
+        if (svc->perf_ctrs == NULL)
+           return -1;
+        ci = svc->perf_ctrs[pcpu];
+
+        for (i = 0; i < NUM_CTRS; ++i) {
+                ci[i].current2 = csched_read_counter_rdmsr(ci[i].myreadmsr);
+        }
+        return 0;
+}
+
+
+int csched_vcpu_monitoring_stop(struct csched_vcpu *svc, int pcpu)
+{
+        int i;
+        ctr_info_t *ci;
+        uint64_t start, delta = 0;
+
+        if (unlikely(svc == NULL))
+                return -1;
+        if (svc->perf_ctrs == NULL)
+                return -1;
+        for (i = 0; i < NUM_CTRS; ++i) {
+                ci = &svc->perf_ctrs[pcpu][i];
+                start = ci->current2;  // value read at launch of VCPU
+                ci->last_value = csched_read_counter_rdmsr(ci->myreadmsr);
+                if (ci->last_value < start)  // an overflow event happened during execution
+                        delta = MAX_COUNTER_VALUE - start + ci->last_value;
+                else // regular counting
+                        delta = ci->last_value - start;
+                ci->sum = csched_add_new_element_to_hist(ci, delta); //sum of the last 5 intervals on any pcpu
+        }
+        return 0;
+}
+
+#endif
+
 static void *
+#ifdef PERF_MON
+csched_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd, int mon_enable)
+#else
 csched_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
+#endif
 {
     struct csched_vcpu *svc;
 
@@ -882,6 +1100,13 @@ csched_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
     svc->flags = 0U;
     svc->pri = is_idle_domain(vc->domain) ?
         CSCHED_PRI_IDLE : CSCHED_PRI_TS_UNDER;
+#ifdef PERF_MON
+    svc->perf_ctrs = NULL;
+    if ( mon_enable ) {
+       if (csched_vcpu_monitoring_init(svc))
+          return NULL;
+    }
+#endif
     CSCHED_VCPU_STATS_RESET(svc);
     CSCHED_STAT_CRANK(vcpu_init);
     return svc;
@@ -1470,7 +1695,11 @@ static void reset_perf_counters(void){
 				/*if(svc->pctr->cycles == 0)*/
 				/*svc->pctr->cycles  = 1;*/
 				svc->pctr->core_type = svc->core_type;
-				/*printk("%lu %lu Updating counters:%d %d %d %d %lu %lu %hu %hu\n",mytime,svc->last_update,svc->vcpu->vcpu_id,svc->vcpu->domain->domain_id,snext->vcpu->vcpu_id,svc->vcpu->domain->domain_id,svc->dmperf,svc->dinst,svc->ipc,svc->util);*/
+				//printk("%lu %lu Updating counters:%d %d %d %d %lu %lu %hu %hu\n",mytime,svc->last_update,svc->vcpu->vcpu_id,svc->vcpu->domain->domain_id,snext->vcpu->vcpu_id,svc->vcpu->domain->domain_id,svc->dmperf,svc->dinst,svc->ipc,svc->util);
+
+				printk("Counters: %lu, %lu, %lu, %lu,  %lu\n", svc->pctr->instns, svc->pctr->active, svc->pctr->lmisses,
+				svc->pctr->rmisses, svc->pctr->cycles);
+
 
 				//reset_counters
 				svc->ctr->dinst = 0;
@@ -1541,12 +1770,45 @@ static void print_heartbeat_msg(void){
 	}
 }
 
+static void print_hwcnts(void){
+	struct csched_dom * sdom;
+	struct csched_vcpu * svc;
+	struct domain *d;
+	struct vcpu *v;
+	/*uint16_t cpu;*/
+	uint64_t mytime, mysec;
+	rdtscll(mytime);
+	mysec = tsc_ticks2ns(mytime)/1000000;
+
+	//update_counters_cpu(NULL);
+	for_each_domain( d )
+	{
+		if(d->domain_id > 0)
+		{
+			sdom = CSCHED_DOM(d);
+			printk("%lu DOM %d ",mysec,d->domain_id);
+			for_each_vcpu( d, v )
+			{
+				svc = CSCHED_VCPU(v);
+				printk("Counters: %lu, %lu, %lu\n", svc->ctr->dinst,svc->ctr->dcycles, svc->ctr->dlmisses);
+			}
+			printk("\n");
+		}
+	}
+}
+
+
 void update_perf_ctrs(struct csched_vcpu *scurr)
 {
 	uint64_t mytime, diff_tsc;
 
 	if(!is_idle_vcpu(scurr->vcpu))
 	{
+
+		uint64_t mysec;
+		rdtscll(mytime);
+		mysec = tsc_ticks2ns(mytime)/1000000;
+
 		//update the counters
 		update_counters_cpu(NULL);
 
@@ -1561,6 +1823,10 @@ void update_perf_ctrs(struct csched_vcpu *scurr)
 		scurr->ctr->dcycles += __get_cpu_var(dcycles);
 		scurr->ctr->dlmisses += __get_cpu_var(dlmisses);
 		scurr->ctr->drmisses += __get_cpu_var(drmisses);
+		printk("Counters: mysec: %lu, CYCLES: %lu, "
+				"INSTR: %lu, LLCMISS: %lu, RDMISS: %lu \n", 
+				mysec, scurr->ctr->dcycles, scurr->ctr->dinst, 
+				scurr->ctr->dlmisses, scurr->ctr->drmisses);
 	}
 }
 #endif
@@ -1604,17 +1870,29 @@ csched_acct(void* dummy)
 		hetero_hcredit_tick = 0;
 	}
 
+	//printk("Before checking hetero_sched_tick %u, %u, %u\n",
+	//				hetero_sched_tick,SCHED_TICK_COUNT,hetero_visor_active);
+
 	if(hetero_sched_tick >= SCHED_TICK_COUNT && hetero_visor_active){
 		reset_perf_counters();
 		hetero_sched_balance();
 		hetero_sched_tick = 0 ;
 	}
 
+	//if(hetero_sched_tick >= SCHED_TICK_COUNT){
+	//	printk("Calling reset_perf_counters \n");
+	//	reset_perf_counters();
+	//}
+
 	if(hetero_debug_tick >= DEBUG_TICK_COUNT && hetero_visor_active){
 		print_heartbeat_msg();
 		hetero_debug_tick = 0 ;
 	}
 
+	if(hetero_debug_tick >= HWCNTRS_PRINT_TICKS && mini_activated){
+		//print_hwcnts();
+		//hetero_debug_tick = 0 ;
+	}
 #endif
 
     spin_lock_irqsave(&prv->lock, flags);
@@ -2027,6 +2305,10 @@ csched_tick(void *_cpu)
     struct csched_private *prv = CSCHED_PRIV(per_cpu(scheduler, cpu));
 
     spc->tick++;
+
+//#ifdef PERF_MON
+  //  hmc_monitor_init(ctrs ,cpu);
+//#endif
 
     /*
      * Accounting for running VCPU
@@ -2700,7 +2982,14 @@ skip_fallback:
 
 #ifdef HETERO_VISOR
 	if(hetero_visor_active)
+	//if(mini_activated)	
 		update_perf_ctrs(scurr);
+
+	if(hetero_debug_tick >= HWCNTRS_PRINT_TICKS && mini_activated){
+		update_perf_ctrs(scurr);
+		hetero_debug_tick=0;
+	}
+
 #endif
     /*
      * Return task to run next...
@@ -2709,70 +2998,123 @@ skip_fallback:
                 -1 : MILLISECS(CSCHED_MSECS_PER_TSLICE));
     ret.task = snext->vcpu;
 
-#ifdef ENABLE_BINPACKING
-	// TODO: when we're going to idle??
-	if (snext->last_passed > MILLISECS(5) && !is_cosched && snext->pri != CSCHED_PRI_IDLE && mini_activated) {
-		if (this_cpu(cosched_flagtime)) {
-			printk("again received cosched signal?\n");
-		}
-		// TODO: clear cosched_expected when this pgd dies..
-		this_cpu(cosched_expected) = ret.task->current_pgd;
-#ifdef DEBUG_WARN
-		if (!ret.task->current_pgd)
-			printk("null-expected ? ");
-#endif
-		snext->count_cosched++;
-		cpumask_t peers = cache2cpumask[proc2intcache[cpu]];
-		cpu_clear(cpu, peers);
-		int i;
-#ifdef VERBOSE_BINPACKING
-		myprintk("send cosched to mask0x%x\n", peers.bits[0]);
-#endif
-		for_each_cpu_mask(i, peers) {
-			per_cpu(cosched_flagtime, i) = now;
-		}
-		cpumask_raise_softirq(peers, SCHEDULE_SOFTIRQ);
-	}
-#endif
-#ifdef ENABLE_CLOCK
-	if (mini_activated && ret.task != current) {
-		struct page_dir *pgd = current->current_pgd;
-		atomic_inc(&mini_count);
-		if (pgd) {
-			pgd->clock_residue += now - pgd->clock_prev_now;
-			pgd->clock_prev_now = now;	// in fact, don't need this
-			do_clock(CLOCK_EVENT_SCHEDULE, pgd, now);
-		}
-		if (ret.task->current_pgd) {
-			ret.task->current_pgd->clock_prev_now = now;	// update
-#ifdef ENABLE_REGIONING2
-			regioning_resume(ret.task->current_pgd, CLOCK_EVENT_SCHEDULE);
-#endif
-		}
-		atomic_dec(&mini_count);
-	}
-#endif
-
-#if 1
-	if (snext->vcpu->run_count) {
-		int run_cache = snext->vcpu->run_cache;
-		snext->vcpu->run_count--;
-		if (!snext->vcpu->run_count)
-			snext->vcpu->run_cache = -1;
-		if (run_cache == proc2intcache[cpu]) {
-#ifdef VERBOSE_USCHED_DETAIL
-			if (usched_print-- > 0)
-			myprintk("actually scheduled on %d$%d (%d remain)\n", cpu, run_cache, snext->vcpu->run_count);
-#endif
-		} else {
-			myprintk("WARN!! run_cache:%d but scheduled to cpu:%d$%d)\n", run_cache, cpu, proc2intcache[cpu]);
-			mypanic("usched failed?\n");
-		}
-	}
-#endif
+ #ifdef PERF_MON
+    csched_vcpu_monitoring_stop(scurr, cpu);
+    csched_vcpu_monitoring_start(snext, cpu);
+ #endif
     CSCHED_VCPU_CHECK(ret.task);
     return ret;
 }
+
+#ifdef MY_PERF_MON_INIT
+static int
+csched_xenoprof_init(const struct scheduler *ops)
+{
+   struct xenoprof_init xenoprof_init;
+   struct xenoprof_counter counter;
+   int ret = 0;
+   
+   printk("Xenoprof_init\n");
+   ret = do_hmc_xenoprof_op(XENOPROF_init, (void *)&xenoprof_init);
+   if(ret < 0)
+   {
+      printk("Xenoprof init error. %d\n", ret); 
+      goto fail_xenoprof;
+   }
+   printk("Xenoprof_reserve_counters\n");
+   ret = do_hmc_xenoprof_op(XENOPROF_reserve_counters, NULL);
+   if(ret < 0)
+   {
+      printk("Xenoprof reserve counters error. %d\n", ret); 
+      goto fail_xenoprof;
+   }
+   printk("Xenoprof_counter_0 init\n");
+
+   counter.ind = 0;
+   counter.count = 0xffffffffffffffff;
+   counter.enabled = 1;
+   counter.event = 0x3C; // On Westmere - CPU_CLK_UNHALTED
+   counter.hypervisor = 0;
+   counter.kernel = 1;
+   counter.user = 1;
+   counter.unit_mask = 0;
+   ret = do_hmc_xenoprof_op(XENOPROF_counter, (void *)&counter);
+   if(ret < 0)
+   {
+       printk("Xenoprof init counter error %d\n", ret);
+       goto fail_xenoprof;
+   }
+   printk("Xenoprof_counter_1 init\n");
+
+   counter.ind = 1;
+   counter.count = 0xffffffffffffffff;
+   counter.enabled = 1;
+   counter.event = 0xC0; // INST_RETIRED on Westmere
+   counter.hypervisor = 0;
+   counter.kernel = 1;
+   counter.user = 1;
+   counter.unit_mask = 0x00;
+   ret = do_hmc_xenoprof_op(XENOPROF_counter, (void *)&counter);
+   if (ret < 0) {
+      printk("counter error %d\n", ret);
+      goto fail_xenoprof;
+   }
+   printk("Xenoprof_counter_2 init\n");
+   
+   counter.ind = 2;
+   counter.count = 0xffffffffffffffff;
+   counter.enabled = 1;
+   counter.event = 0x2E; // LLC_MISSES on Westmere
+   counter.hypervisor = 0;
+   counter.kernel = 1;
+   counter.user = 1;
+   counter.unit_mask = 0x41;
+   ret = do_hmc_xenoprof_op(XENOPROF_counter, (void *)&counter);
+   if (ret < 0) {
+      printk("counter error %d\n", ret);
+      goto fail_xenoprof;
+   }   
+   printk("Xenoprof_counter_3 init\n");
+   
+   counter.ind = 3;
+   counter.count = 0xffffffffffffffff;
+   counter.enabled = 1;
+   counter.event = 0x0F; // Mem_uncore_retired remotehome-dram/cache on Westmere
+   counter.hypervisor = 0;
+   counter.kernel = 1;
+   counter.user = 1;
+   counter.unit_mask = 0x10;
+   ret = do_hmc_xenoprof_op(XENOPROF_counter, (void *)&counter);
+   if (ret < 0) {
+      printk("counter error %d\n", ret);
+      goto fail_xenoprof;
+   }
+   printk("Xenoprof_setup_events\n");
+
+
+   ret = do_hmc_xenoprof_op(XENOPROF_setup_events, NULL);
+   if (ret < 0) {
+      printk("setup_events error %d\n", ret);
+      goto fail_xenoprof;
+   }
+
+   printk("Xenoprof_start\n");
+   ret = do_hmc_xenoprof_op(XENOPROF_start, NULL);
+   if (ret < 0) {
+      printk("start error %d\n", ret);
+      goto fail_xenoprof;
+   }
+
+   //printk("Credit Scheduler Xenoprof Init : Test_loop\n");
+   //test_counter_values();
+   
+
+fail_xenoprof:
+   return ret;
+   
+}
+
+#endif
 
 static void
 csched_dump_vcpu(struct csched_vcpu *svc)
@@ -3227,12 +3569,12 @@ long read_perfctr(XEN_GUEST_HANDLE(void) arg){
 		id++;
 		}
 		else
-			printk("MAX_VCPUS violation\n");
+		printk("MAX_VCPUS violation\n");
 	}
 
-	/*for(id = 0; id < MAX_VCPUS; id++)*/
-	/*printk("%lu %lu %lu ",p[id].active,p[id].instns,p[id].cycles);  */
-	/*printk("\n");*/
+	for(id = 0; id < MAX_VCPUS; id++)
+		printk("%lu %lu %lu ",p[id].active,p[id].instns,p[id].cycles);  
+	printk("\n");
 
 	/*__copy_to_guest(arg,&c,1);*/
 	__copy_to_guest(arg,p,MAX_VCPUS);
@@ -3344,6 +3686,17 @@ const struct scheduler sched_credit_def = {
     .init           = csched_init,
     .deinit         = csched_deinit,
     .alloc_vdata    = csched_alloc_vdata,
+/*
+#ifdef PERF_MON
+    .move_mondata   = csched_move_mondata,
+#endif
+*/
+#ifdef MY_PERF_MON_INIT
+    .init_xenoprof  = csched_xenoprof_init,
+#endif
+#ifdef PERF_MON
+    .vcpu_readctrs  = csched_vcpu_readctrs,
+#endif
     .free_vdata     = csched_free_vdata,
     .alloc_pdata    = csched_alloc_pdata,
     .free_pdata     = csched_free_pdata,

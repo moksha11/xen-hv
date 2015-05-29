@@ -36,6 +36,7 @@
 #include <xsm/xsm.h>
 #include <xen/trace.h>
 #include <xen/tmem.h>
+#include <mini.h>
 
 /* Linux config option: propageted to domain0 */
 /* xen_processor_pmbits: xen control Cx, Px, ... */
@@ -134,8 +135,13 @@ static void vcpu_check_shutdown(struct vcpu *v)
     spin_unlock(&d->shutdown_lock);
 }
 
+#ifdef PERF_MON
+struct vcpu *alloc_vcpu(
+    struct domain *d, unsigned int vcpu_id, unsigned int cpu_id, int mon_enable)
+#else
 struct vcpu *alloc_vcpu(
     struct domain *d, unsigned int vcpu_id, unsigned int cpu_id)
+#endif
 {
     struct vcpu *v;
 
@@ -166,7 +172,11 @@ struct vcpu *alloc_vcpu(
         init_waitqueue_vcpu(v);
     }
 
+#ifdef PERF_MON
+    if ( sched_init_vcpu(v, cpu_id, mon_enable) != 0 )
+#else
     if ( sched_init_vcpu(v, cpu_id) != 0 )
+#endif
     {
         destroy_waitqueue_vcpu(v);
         free_vcpu_struct(v);

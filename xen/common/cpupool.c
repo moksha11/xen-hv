@@ -15,6 +15,7 @@
 #include <xen/init.h>
 #include <xen/cpumask.h>
 #include <xen/percpu.h>
+#include <mini.h>
 #include <xen/sched.h>
 #include <xen/sched-if.h>
 #include <xen/cpu.h>
@@ -160,7 +161,9 @@ static struct cpupool *cpupool_create(
             return NULL;
         }
     }
-
+#ifdef MY_PERF_MON_INIT
+    c->xenoprof_status = CPUPOOL_XENOPROF_UNINITED;
+#endif
     *q = c;
 
     spin_unlock(&cpupool_lock);
@@ -356,12 +359,26 @@ int cpupool_add_domain(struct domain *d, int poolid)
 {
     struct cpupool *c;
     int rc = 1;
-    int n_dom = 0;
+    int n_dom=0;
 
     if ( poolid == CPUPOOLID_NONE )
         return 0;
     spin_lock(&cpupool_lock);
+// This is a weird place to initialize xenoprof, however no cycles at the moment to find right place
+#ifdef MY_PERF_MON_INIT
+   if(cpupool0->xenoprof_status == CPUPOOL_XENOPROF_UNINITED && cpus_weight(cpupool0->cpu_valid) == num_present_cpus())
+   {
+      printk("Xenoprof initiatization of cpupool0: %d\n", cpus_weight(cpupool0->cpu_valid));
+      cpupool0->sched->init_xenoprof(cpupool0->sched);
+      cpupool0->xenoprof_status = CPUPOOL_XENOPROF_INITIALIZED;
+      printk("Xenoprof initiatization of cpupool0 ...done\n");
+   } 
+#endif
+#ifdef PERF_MON
+	c = cpupool_find_by_id(poolid);
+#else
     c = cpupool_find_by_id(poolid);
+#endif
     if ( (c != NULL) && cpus_weight(c->cpu_valid) )
     {
         c->n_dom++;
@@ -406,6 +423,15 @@ static void cpupool_cpu_add(unsigned int cpu)
     cpu_clear(cpu, cpupool_locked_cpus);
     cpu_set(cpu, cpupool_free_cpus);
     cpupool_assign_cpu_locked(cpupool0, cpu);
+/*#ifdef MY_PERF_MON_INIT
+   if(cpupool0->xenoprof_status == CPUPOOL_XENOPROF_UNINITED && cpus_weight(cpupool0->cpu_valid) == num_present_cpus())
+   {
+      printk("Xenoprof initiatization of cpupool0: %d\n", cpus_weight(cpupool0->cpu_valid));
+      cpupool0->sched->init_xenoprof(cpupool0->sched);
+      cpupool0->xenoprof_status = CPUPOOL_XENOPROF_INITIALIZED;
+      printk("Xenoprof initiatization of cpupool0 ...done\n");
+   } 
+#endif*/
     spin_unlock(&cpupool_lock);
 }
 

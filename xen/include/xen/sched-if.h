@@ -9,6 +9,11 @@
 #define __XEN_SCHED_IF_H__
 
 #include <xen/percpu.h>
+#include <mini.h>
+
+#ifdef PERF_MON
+#include <public/xenoprof.h>
+#endif
 
 /* A global pointer to the initial cpupool (POOL0). */
 extern struct cpupool *cpupool0;
@@ -145,8 +150,21 @@ struct scheduler {
     void         (*deinit)         (const struct scheduler *);
 
     void         (*free_vdata)     (const struct scheduler *, void *);
+#ifdef PERF_MON
+    void *       (*alloc_vdata)    (const struct scheduler *, struct vcpu *,
+                                    void *, int);
+#else
     void *       (*alloc_vdata)    (const struct scheduler *, struct vcpu *,
                                     void *);
+#endif
+#ifdef PERF_MON
+    void *       (*move_mondata)   (const struct scheduler *, struct vcpu *,
+                                    struct vcpu *);
+    void         (*vcpu_readctrs)  (const struct scheduler *, struct vcpu *, uint64_t *);
+#endif
+#ifdef MY_PERF_MON_INIT
+    int          (*init_xenoprof)  (const struct scheduler *);
+#endif
     void         (*free_pdata)     (const struct scheduler *, void *, int);
     void *       (*alloc_pdata)    (const struct scheduler *, int);
     void         (*free_domdata)   (const struct scheduler *, void *);
@@ -180,10 +198,18 @@ struct scheduler {
     void         (*tick_suspend)    (const struct scheduler *, unsigned int);
     void         (*tick_resume)     (const struct scheduler *, unsigned int);
 };
+#ifdef MY_PERF_MON_INIT
+#define CPUPOOL_XENOPROF_UNINITED 0
+#define CPUPOOL_XENOPROF_INITIALIZED 1
+#endif
+
 
 struct cpupool
 {
     int              cpupool_id;
+#ifdef MY_PERF_MON_INIT
+    int              xenoprof_status;
+#endif
     cpumask_t        cpu_valid;      /* all cpus assigned to pool */
     struct cpupool   *next;
     unsigned int     n_dom;

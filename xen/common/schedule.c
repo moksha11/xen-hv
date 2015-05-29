@@ -37,6 +37,9 @@
 #include <xsm/xsm.h>
 #include <mini.h>
 #include <xen/heterovisor.h>
+#ifdef PERF_MON
+#include <public/xenoprof.h>
+#endif
 
 /* opt_sched: scheduler - default to credit */
 static char __initdata opt_sched[10] = "credit";
@@ -189,7 +192,11 @@ uint64_t get_cpu_idle_time(unsigned int cpu)
     return state.time[RUNSTATE_running];
 }
 
+#ifdef PERF_MON
+int sched_init_vcpu(struct vcpu *v, unsigned int processor, int mon_enable) 
+#else
 int sched_init_vcpu(struct vcpu *v, unsigned int processor) 
+#endif
 {
     struct domain *d = v->domain;
 
@@ -220,7 +227,11 @@ int sched_init_vcpu(struct vcpu *v, unsigned int processor)
 
     TRACE_2D(TRC_SCHED_DOM_ADD, v->domain->domain_id, v->vcpu_id);
 
+#ifdef PERF_MON
+    v->sched_priv = SCHED_OP(DOM2OP(d), alloc_vdata, v, d->sched_priv, mon_enable);
+#else
     v->sched_priv = SCHED_OP(DOM2OP(d), alloc_vdata, v, d->sched_priv);
+#endif
     if ( v->sched_priv == NULL )
         return 1;
 #if 1
@@ -258,6 +269,9 @@ int sched_move_domain(struct domain *d, struct cpupool *c)
     unsigned int new_p;
     void **vcpu_priv;
     void *domdata;
+#ifdef PERF_MON
+    int mon_enable;
+#endif
 
     domdata = SCHED_OP(c->sched, alloc_domdata, d);
     if ( domdata == NULL )
@@ -271,9 +285,16 @@ int sched_move_domain(struct domain *d, struct cpupool *c)
     }
 
     memset(vcpu_priv, 0, d->max_vcpus * sizeof(void *));
+#ifdef PERF_MON
+    mon_enable = d->mon_enable;
+#endif
     for_each_vcpu ( d, v )
     {
+#ifdef PERF_MON
+        vcpu_priv[v->vcpu_id] = SCHED_OP(c->sched, alloc_vdata, v, domdata, 0);
+#else
         vcpu_priv[v->vcpu_id] = SCHED_OP(c->sched, alloc_vdata, v, domdata);
+#endif
         if ( vcpu_priv[v->vcpu_id] == NULL )
         {
             for_each_vcpu ( d, v )
@@ -1118,6 +1139,38 @@ int sched_id(void)
 {
     return ops.sched_id;
 }
+#ifdef PERF_MON
+int sched_vcpu_readctrs(struct domain *d)
+{
+    struct vcpu *v;
+    int i = 0;
+    for_each_vcpu ( d, v )
+    {
+        if ( v != current )
+            vcpu_pause(v);
+    }
+
+    if ( d == current->domain )
+        vcpu_schedule_lock_irq(current);
+
+    for_each_vcpu ( d, v )
+    {
+       SCHED_OP(DOM2OP(d), vcpu_readctrs, v, d->sum[i]);
+       i++;
+    }
+
+    if ( d == current->domain )
+        vcpu_schedule_unlock_irq(current);
+
+    for_each_vcpu ( d, v )
+    {
+        if ( v != current )
+            vcpu_unpause(v);
+    }
+
+    return 0;
+}
+#endif
 
 /* Adjust scheduling parameter for a given domain. */
 long sched_adjust(struct domain *d, struct xen_domctl_scheduler_op *op)
@@ -1383,7 +1436,11 @@ static int cpu_schedule_up(unsigned int cpu)
         return 0;
 
     if ( idle_vcpu[cpu] == NULL )
-        alloc_vcpu(idle_vcpu[0]->domain, cpu, cpu);
+#ifdef PERF_MON
+      alloc_vcpu(idle_vcpu[0]->domain, cpu, cpu,0);
+#else
+      alloc_vcpu(idle_vcpu[0]->domain, cpu, cpu);
+#endif
     if ( idle_vcpu[cpu] == NULL )
         return -ENOMEM;
 
@@ -1463,7 +1520,11 @@ void __init scheduler_init(void)
     BUG_ON(idle_domain == NULL);
     idle_domain->vcpu = idle_vcpu;
     idle_domain->max_vcpus = NR_CPUS;
+#ifdef PERF_MON
+    if ( alloc_vcpu(idle_domain, 0, 0,0) == NULL )
+#else
     if ( alloc_vcpu(idle_domain, 0, 0) == NULL )
+#endif
         BUG();
     if ( ops.alloc_pdata &&
          !(this_cpu(schedule_data).sched_priv = ops.alloc_pdata(&ops, 0)) )
@@ -1485,7 +1546,11 @@ int schedule_cpu_switch(unsigned int cpu, struct cpupool *c)
     ppriv = SCHED_OP(new_ops, alloc_pdata, cpu);
     if ( ppriv == NULL )
         return -ENOMEM;
+#ifdef PERF_MON
+    vpriv = SCHED_OP(new_ops, alloc_vdata, idle, idle->domain->sched_priv, 0);
+#else
     vpriv = SCHED_OP(new_ops, alloc_vdata, idle, idle->domain->sched_priv);
+#endif
     if ( vpriv == NULL )
     {
         SCHED_OP(new_ops, free_pdata, ppriv, cpu);
