@@ -240,13 +240,18 @@ static int hetero(unsigned int mfn, int add /* 1 for add, 0 for del */)
 
 #endif
 
-#define MAX_SCAN	8192	// scan up to this number of pages..
-#define MAX_TEMP_MFNS	4096
-#define TIME_WINDOW	500	// in millisec
+//#define MAX_SCAN	16384	// scan up to this number of pages..
+//#define MAX_TEMP_MFNS	8192
+//#define TIME_WINDOW	500	// in millisec
 
-//#define MAX_SCAN 32768	// scan up to this number of pages..
-//#define MAX_TEMP_MFNS 16384
-//#define TIME_WINDOW 10000	// in millisec
+//#define MAX_SCAN 16384	// scan up to this number of pages..
+//#define MAX_TEMP_MFNS 8192
+//#define TIME_WINDOW 500	// in millisec
+
+
+#define MAX_SCAN 32768	// scan up to this number of pages..
+#define MAX_TEMP_MFNS 16384
+#define TIME_WINDOW 500	// in millisec
 
 
 // vr->lock is held when called.

@@ -30,7 +30,10 @@
 #endif
 
 #define HETEROPERF
-
+//#ifdef HETEROPERF
+#define RESET_PERFCOUNT 0
+#define READ_PERFCOUNT 1
+//#endif
 
 /*
  * CSCHED_STATS
@@ -197,6 +200,7 @@ struct csched_vcpu {
     struct list_head hetero_vcpu_elem;
 	struct perf_ctrs * pctr;
 	struct counters * ctr;
+	struct perf_ctrs  *totpctr;
 #endif
     s_time_t start_time;   /* When we were scheduled (used for credit) */
     uint16_t flags;
@@ -1091,8 +1095,11 @@ csched_alloc_vdata(const struct scheduler *ops, struct vcpu *vc, void *dd)
     atomic_set(&svc->scredit, 0);
 	atomic_set(&svc->fcredit, 0);
 	svc->core_type = 0;
+
     svc->ctr = xmalloc(struct counters);
     svc->pctr = xmalloc(struct perf_ctrs);
+	svc->totpctr = xmalloc(struct perf_ctrs);
+
 	svc->ctr->last_update = 0;
     INIT_LIST_HEAD(&svc->fast_vcpu_elem);
     INIT_LIST_HEAD(&svc->hetero_vcpu_elem);
@@ -1680,6 +1687,7 @@ static void reset_perf_counters(void){
 	{
 	for_each_domain( d )
 	{
+		/*Lets do it only for guest domain*/
 		if(d->domain_id > 0){
 		for_each_vcpu( d, v )
 		{
@@ -1695,10 +1703,19 @@ static void reset_perf_counters(void){
 				/*if(svc->pctr->cycles == 0)*/
 				/*svc->pctr->cycles  = 1;*/
 				svc->pctr->core_type = svc->core_type;
-				//printk("%lu %lu Updating counters:%d %d %d %d %lu %lu %hu %hu\n",mytime,svc->last_update,svc->vcpu->vcpu_id,svc->vcpu->domain->domain_id,snext->vcpu->vcpu_id,svc->vcpu->domain->domain_id,svc->dmperf,svc->dinst,svc->ipc,svc->util);
+				//printk("Counters: %lu, %lu, %lu, %lu,  %lu\n", svc->pctr->instns, svc->pctr->active, svc->pctr->lmisses,
+				//svc->pctr->rmisses, svc->pctr->cycles);
 
-				printk("Counters: %lu, %lu, %lu, %lu,  %lu\n", svc->pctr->instns, svc->pctr->active, svc->pctr->lmisses,
-				svc->pctr->rmisses, svc->pctr->cycles);
+				svc->totpctr->instns += svc->ctr->dinst;
+				svc->totpctr->cycles += diff_tsc;
+				svc->totpctr->lmisses += svc->ctr->dlmisses;
+				svc->totpctr->rmisses += svc->ctr->drmisses;
+				/*svc->totpctr->core_type = svc->pctr->core_type;*/
+
+				/*svc->totpctr->instns = svc->pctr->instns;
+				svc->totpctr->cycles = svc->pctr->cycles;
+				svc->totpctr->lmisses = svc->pctr->lmisses;
+				svc->totpctr->rmisses = svc->pctr->rmisses;*/
 
 
 				//reset_counters
@@ -1823,10 +1840,10 @@ void update_perf_ctrs(struct csched_vcpu *scurr)
 		scurr->ctr->dcycles += __get_cpu_var(dcycles);
 		scurr->ctr->dlmisses += __get_cpu_var(dlmisses);
 		scurr->ctr->drmisses += __get_cpu_var(drmisses);
-		printk("Counters: mysec: %lu, CYCLES: %lu, "
-				"INSTR: %lu, LLCMISS: %lu, RDMISS: %lu \n", 
-				mysec, scurr->ctr->dcycles, scurr->ctr->dinst, 
-				scurr->ctr->dlmisses, scurr->ctr->drmisses);
+		//printk("Counters: mysec: %lu, CYCLES: %lu, "
+		//		"INSTR: %lu, LLCMISS: %lu, RDMISS: %lu \n", 
+		//		mysec, scurr->ctr->dcycles, scurr->ctr->dinst, 
+		//		scurr->ctr->dlmisses, scurr->ctr->drmisses);
 	}
 }
 #endif
@@ -1874,7 +1891,9 @@ csched_acct(void* dummy)
 	//				hetero_sched_tick,SCHED_TICK_COUNT,hetero_visor_active);
 
 	if(hetero_sched_tick >= SCHED_TICK_COUNT && hetero_visor_active){
+#ifdef HETEROPERF
 		reset_perf_counters();
+#endif
 		hetero_sched_balance();
 		hetero_sched_tick = 0 ;
 	}
@@ -2981,14 +3000,14 @@ skip_fallback:
         snext->start_time += now;
 
 #ifdef HETERO_VISOR
-	if(hetero_visor_active)
+	//if(hetero_visor_active)
 	//if(mini_activated)	
 		update_perf_ctrs(scurr);
 
-	if(hetero_debug_tick >= HWCNTRS_PRINT_TICKS && mini_activated){
-		update_perf_ctrs(scurr);
-		hetero_debug_tick=0;
-	}
+	//if(hetero_debug_tick >= HWCNTRS_PRINT_TICKS && mini_activated){
+	//	update_perf_ctrs(scurr);
+	//	hetero_debug_tick=0;
+	//}
 
 #endif
     /*
@@ -3553,31 +3572,87 @@ uint16_t change_estate(int resource, int state, XEN_GUEST_HANDLE(void) cap)
 	return 0;
 }
 
-long read_perfctr(XEN_GUEST_HANDLE(void) arg){
+long read_perfctr(int op, XEN_GUEST_HANDLE(void) arg){
 	struct vcpu * v = current;
 	struct domain *d = current->domain;
 	struct perf_ctrs p[MAX_VCPUS];
+	struct perf_ctrs p_sum[MAX_VCPUS];
+	struct perf_ctrs *perfptr;
+
 	int id = 0;
 	struct csched_vcpu *svc;
 
-	for_each_vcpu( d, v )
-	{
-		if(id < MAX_VCPUS){	
-		svc = CSCHED_VCPU(v);
-		/*memcpy(&c.p[id],&(svc->pctr),sizeof(struct perf_ctrs));*/
-		p[id] = *(svc->pctr);
-		id++;
+	reset_perf_counters();
+
+	if(d > 0) {
+		for_each_vcpu( d, v )
+		{	
+			if(id < MAX_VCPUS){
+				svc = CSCHED_VCPU(v);
+				/*memcpy(&c.p[id],&(svc->pctr),sizeof(struct perf_ctrs));*/
+				//update_perf_ctrs(svc);
+				
+				if(svc && svc->pctr && svc->ctr) {
+					switch(op) {
+					case RESET_PERFCOUNT:
+						//printk("RESET_PERFCOUNT %d \n",op);
+						svc->pctr->instns = 0;
+						svc->pctr->cycles = 0;
+						svc->pctr->lmisses = 0;
+						svc->pctr->active = 0;
+						svc->ctr->dinst = 0;
+						svc->ctr->dcycles = 0;
+						svc->ctr->dlmisses = 0;
+						svc->ctr->drmisses = 0;
+						svc->ctr->dmperf = 0;
+						svc->ctr->dtsc = 0;
+						svc->totpctr->instns = 0;
+						svc->totpctr->cycles = 0;
+						svc->totpctr->lmisses= 0;
+						svc->totpctr->rmisses= 0;
+						rdtscll(perfctr_update);
+						break;
+
+					case READ_PERFCOUNT:
+					default:
+						//printk("READ_PERFCOUNT %d \n",op);
+						p[id] = *(svc->pctr);
+						p_sum[id]= *(svc->totpctr);
+						/*printk("INSTS: %lu CYCLES: %lu LLCMISSES: %lu ACTIVE?: %lu\n",
+								p[id].instns,p[id].cycles, p[id].lmisses,
+								p[id].active);*/
+						//printk("Tot INSTS: %lu Tot CYCLES: %lu Tot LLCMISSES: %lu \n",
+						//		p_sum[id].instns, p_sum[id].cycles, p_sum[id].lmisses);
+						id++;
+						break;
+					}	
+			}
+			else
+				printk("MAX_VCPUS violation\n");
+			}		
 		}
-		else
-		printk("MAX_VCPUS violation\n");
 	}
 
-	for(id = 0; id < MAX_VCPUS; id++)
-		printk("%lu %lu %lu ",p[id].active,p[id].instns,p[id].cycles);  
-	printk("\n");
+	/*reset CPUs that are not online*/
+	while(id < MAX_VCPUS) {
 
+		p[id].instns = 0;
+		p[id].cycles = 0;
+		p[id].lmisses = 0;
+		p[id].core_type = 0;
+		p[id].rmisses = 0;
+		p[id].active = 0;
+		p[id].instns = 0;
+
+		p_sum[id].cycles = 0;
+		p_sum[id].lmisses = 0;
+		p_sum[id].core_type = 0;
+		p_sum[id].rmisses = 0;
+		p_sum[id].active = 0;
+		id++;
+	}
 	/*__copy_to_guest(arg,&c,1);*/
-	__copy_to_guest(arg,p,MAX_VCPUS);
+	__copy_to_guest(arg,p_sum,MAX_VCPUS);
 	return 0;
 }
 

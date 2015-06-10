@@ -719,6 +719,7 @@ ENTRY(hypercall_table)
         .quad do_alloc_hetero_op
         .quad do_hsm_get_mfn
         .quad do_hsm_free_mfn
+	.quad do_perfctr_op
         .rept __HYPERVISOR_arch_0-((.-hypercall_table)/8)
         .quad do_ni_hypercall
         .endr

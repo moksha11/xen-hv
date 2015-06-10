@@ -94,7 +94,7 @@ uint16_t change_estate(int resource, int state, XEN_GUEST_HANDLE(void) ecap);
 void change_debug_level(int arg);
 void change_hetero_config(int arg, int arg2, int arg3, int arg4);
 void enable_hetero_visor(int arg, int arg2);
-long read_perfctr(XEN_GUEST_HANDLE(void) arg);
+long read_perfctr(int op, XEN_GUEST_HANDLE(void) arg);
 int hsm_trylock();
 int hsm_unlock();
 

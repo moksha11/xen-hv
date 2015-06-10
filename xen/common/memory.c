@@ -40,8 +40,8 @@ static unsigned int guest_startidx;
 static unsigned int guest_stopidx;
 atomic_t disabl_shrink_hotpg;
 
-#define MAX_HOT_MFNS 256000
-#define MAX_HOT_MFNS_GUEST 256000
+#define MAX_HOT_MFNS 128000
+#define MAX_HOT_MFNS_GUEST 128000
 #define _USE_SHAREDMEM
 
 

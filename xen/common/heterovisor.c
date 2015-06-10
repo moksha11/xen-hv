@@ -46,10 +46,10 @@ long do_alloc_hetero_op(int pages)
 }
 
 
-
 long do_perfctr_op(int op, XEN_GUEST_HANDLE(void) arg)
 {
-    read_perfctr(arg);
+    //printk("calling do_perfctr_op \n");	
+    read_perfctr(op, arg);
     return 0;
 }
 
@@ -57,7 +57,7 @@ struct frame {
     unsigned int mfn;
 };
 
-#define NUM_PAGES 256
+#define NUM_PAGES 128
 static void* shared_page[NUM_PAGES];
 static unsigned int frames_ppage = 0;
 static volatile unsigned int* lock;
@@ -215,15 +215,15 @@ int free_page(void *page_addr)
 /* hypercall */
 long do_hsm_free_mfn(uint64_t mfn)
 {
-    unsigned int pidx;
 
+   XEN_GUEST_HANDLE(void) arg;
+   unsigned int pidx;
     (void)mfn; // ignore
 
     for(pidx = 0; pidx < NUM_PAGES; ++pidx) {
         printk("freeing page %u\n", pidx);
         free_page(shared_page[pidx]);
     }
-
     frames_ppage = 0;
     return 0;
 }
@@ -238,6 +238,8 @@ void hsm_add_mfn(unsigned int mfn, unsigned int idx)
     if (frames_ppage == 0) {
 	hsm_setup();
     }
+
+    //printk("hsm_add_mfn mfn %u, idx %u \n",mfn,idx);		
 	
     max_frames = frames_ppage * NUM_PAGES;
     idx = cur_idx % max_frames;

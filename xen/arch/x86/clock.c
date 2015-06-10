@@ -21,9 +21,64 @@
 #include <xen/softirq.h>
 #include <mini.h>
 
+
+
 #ifdef ENABLE_CLOCK
 // we're doing clock on pgd basis
 void do_clock(int event_nr, struct page_dir *pgd, s_time_t now)
+{
+	MYASSERT(pgd==current->current_pgd);	// so we can eliminate  'pgd' parameter of do_clock
+
+	// TODO: maybe lock needed to protect clock_residue and diff ?
+	s_time_t diff = (pgd->clock_residue + now - pgd->clock_prev_now);
+	if (now < pgd->clock_prev_now) {	// sometimes happens
+		diff = pgd->clock_residue;
+	}
+	pgd->clock_prev_now = now;
+
+	if (diff < MILLISECS(clock_period_ms))
+	{
+		pgd->clock_residue = diff;
+	} else {
+		// probably we don't need pgd->lock here..
+		{
+#ifdef ENABLE_TIMESTAMP
+			timestamp_start(TIMESTAMP_CLEAR_ABIT);
+#endif
+			pgd->clock_residue = 0;		// diff contains it, so clear it.
+
+#ifdef ENABLE_ABIT
+			clear_abit(pgd, now);
+#endif
+			pgd->clock_cr3_changes = 0;
+			pgd->clock_timer = 0;
+			pgd->clock_schedule = 0;
+
+#ifdef ENABLE_TIMESTAMP
+			timestamp(TIMESTAMP_CLEAR_ABIT, 1);
+			timestamp_end(TIMESTAMP_CLEAR_ABIT, 2);
+#endif
+		}
+	}
+
+	if (event_nr == CLOCK_EVENT_NEW_CR3) {
+		pgd->clock_cr3_changes++;
+	} else if (event_nr == CLOCK_EVENT_TIMER) {
+		pgd->clock_timer++;
+	} else if (event_nr == CLOCK_EVENT_SCHEDULE) {
+		pgd->clock_schedule++;
+	} else {
+		mypanic("Unknown clock event?");
+	}
+}
+#endif
+
+
+
+
+#ifdef ENABLE_CLOCK
+// we're doing clock on pgd basis
+void do_clock_orig(int event_nr, struct page_dir *pgd, s_time_t now)
 {
 	MYASSERT(pgd==current->current_pgd);	// so we can eliminate  'pgd' parameter of do_clock
 
