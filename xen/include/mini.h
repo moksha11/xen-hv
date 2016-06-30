@@ -109,8 +109,8 @@ DECLARE_PER_CPU(unsigned long, locked_pt_loc);
 //#define ENABLE_HISTOGRAM	// tried to rework 'density' but unsuccessful.. let's not use this
 #define ENABLE_HETERO		// migrate pages
 #define ENABLE_MULTI_NODE //memory allocation from multiple nodes
-#define SLOW_MEMORY_NODE 1
-#define FAST_MEMORY_NODE 0
+#define FAST_MEMORY_NODE 1
+#define SLOW_MEMORY_NODE 0
 //#define ENABLE_DENSITY
 //#define ENABLE_CACHEMAN1
 #if 0
@@ -498,6 +498,13 @@ struct rmaps_builtin {
 	unsigned long default_padding_dont_use[MAX_RMAP_ENTRIES_DEFAULT];
 };
 #endif
+
+//sudarsun changes
+static unsigned int max_scan_arg;
+static unsigned int max_temp_scan_arg;
+static unsigned int use_shared_mem;
+void reconfigure_hotpage_params(int clockms, unsigned int maxscan, 
+				unsigned int maxtempscan, unsigned int sharedmem);
 
 struct frame_t {
 #ifndef ENABLE_SEPARATE_VRT

@@ -145,6 +145,10 @@ extern long
 do_alloc_hetero_op(
 	int pages);
 
+extern long 
+do_set_hetero_param_op(int op, XEN_GUEST_HANDLE(hetero_params_t) arg);
+
+
 extern long
 do_hsm_get_mfn(XEN_GUEST_HANDLE(uint64_t) mfn);
 

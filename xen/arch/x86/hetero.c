@@ -240,18 +240,18 @@ static int hetero(unsigned int mfn, int add /* 1 for add, 0 for del */)
 
 #endif
 
-//#define MAX_SCAN	16384	// scan up to this number of pages..
-//#define MAX_TEMP_MFNS	8192
-//#define TIME_WINDOW	500	// in millisec
+#define MAX_SCAN	16384	// scan up to this number of pages..
+#define MAX_TEMP_MFNS	8192
+#define TIME_WINDOW	500	// in millisec
 
-//#define MAX_SCAN 16384	// scan up to this number of pages..
-//#define MAX_TEMP_MFNS 8192
+//#define MAX_SCAN 2048	// scan up to this number of pages..
+//#define MAX_TEMP_MFNS 1024
 //#define TIME_WINDOW 500	// in millisec
 
 
-#define MAX_SCAN 32768	// scan up to this number of pages..
-#define MAX_TEMP_MFNS 16384
-#define TIME_WINDOW 500	// in millisec
+//#define MAX_SCAN 32768	// scan up to this number of pages..
+//#define MAX_TEMP_MFNS 16384
+//#define TIME_WINDOW 100	// in millisec
 
 
 // vr->lock is held when called.
@@ -364,10 +364,9 @@ static int scan_hot_pages(s_time_t now, struct vregion_t *vr, unsigned int *mfns
 #ifdef HETERO_PAGE_VM_LIMITS
 	int within_limit;
 #endif
-
     //hsm_reset_idx();
-
 	do {
+
 	frame_count++;
 	time = ((unsigned long)FTABLE_TIME(cur) << 20);
 
@@ -404,10 +403,20 @@ static int scan_hot_pages(s_time_t now, struct vregion_t *vr, unsigned int *mfns
 		}
 	}
 	cur = FTABLE_PREV(cur);	// reverse looping
-	if (ret >= MAX_TEMP_MFNS || frame_count >= MAX_SCAN) {	// note that clear_abit() keeps adding to list..
+
+    if( max_scan_arg &&  max_temp_scan_arg)
+    {
+	if (ret >= max_temp_scan_arg || frame_count >= max_scan_arg) {	// note that clear_abit() keeps adding to list..
+		//printk("max_scan_arg %u, max_temp_scan_arg %u \n", max_temp_scan_arg, max_scan_arg);
 		vr->head = cur;	// set head
 		break;
 	}
+    }
+    else if (ret >= MAX_TEMP_MFNS || frame_count >= MAX_SCAN) {	// note that clear_abit() keeps adding to list..
+		vr->head = cur;	// set head
+		break;
+	}
+
 	} while(cur != start);
 	return ret;
 }
@@ -418,7 +427,7 @@ DEFINE_PER_CPU(unsigned int [MAX_TEMP_MFNS], mfns_from_hot_list);
 DEFINE_PER_CPU(char [MAX_TEMP_MFNS], flag_from_hot_list);
 
 
-void shrink_hot_pages(s_time_t now)
+void shrink_hot_pages_july14(s_time_t now)
 {
 	unsigned int *mfns = per_cpu(mfns_from_hot_list, smp_processor_id());
 	char *flag = per_cpu(flag_from_hot_list, smp_processor_id());
@@ -438,7 +447,7 @@ void shrink_hot_pages(s_time_t now)
 #endif
 	myspin_lock(&seed_user_hot->lock, 29);
 	ret = scan_hot_pages(now, seed_user_hot, mfns, flag, &migrate);
-	//migrate = 0;
+	migrate = 0;
 
 #ifdef ENABLE_HETERO
 	if (migrate)	// true if any copy is necessary..
@@ -573,7 +582,7 @@ void shrink_hot_pages_old(s_time_t now)
 
 
 
-void shrink_hot_pages_working(s_time_t now)
+void shrink_hot_pages(s_time_t now)
 {
 	unsigned int *mfns = per_cpu(mfns_from_hot_list, smp_processor_id());
 	char *flag = per_cpu(flag_from_hot_list, smp_processor_id());
@@ -593,7 +602,7 @@ void shrink_hot_pages_working(s_time_t now)
 #endif
 	myspin_lock(&seed_user_hot->lock, 29);
 	ret = scan_hot_pages(now, seed_user_hot, mfns, flag, &migrate);
-	//migrate = 0;
+	migrate = 1;
 
 #ifdef ENABLE_HETERO
 	if (migrate)	// true if any copy is necessary..

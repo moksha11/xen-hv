@@ -45,6 +45,14 @@ long do_alloc_hetero_op(int pages)
     return 0;
 }
 
+long do_set_hetero_param_op(int op,  XEN_GUEST_HANDLE(hetero_params_t) arg)
+{
+    set_hetero_param_op(op,arg);	
+    return 0;
+}
+
+
+
 
 long do_perfctr_op(int op, XEN_GUEST_HANDLE(void) arg)
 {

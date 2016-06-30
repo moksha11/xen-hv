@@ -2169,7 +2169,7 @@ int __init construct_dom0(struct domain *d,
 	pkern_end = parms.virt_kend;
 	pkern_entry = parms.virt_entry;
 
-//printk("p_start=%lx, pkern_start=%lx, pkern_end=%lx, pkern_entry=%lx\n",p_start,pkern_start,pkern_end,pkern_entry);
+	//printk("p_start=%lx, pkern_start=%lx, pkern_end=%lx, pkern_entry=%lx\n",p_start,pkern_start,pkern_end,pkern_entry);
 
 	if ( (p_start & (PAGE_SIZE-1)) != 0 )
 	{

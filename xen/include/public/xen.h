@@ -100,6 +100,7 @@ DEFINE_XEN_GUEST_HANDLE(xen_pfn_t);
 #define __HYPERVISOR_hsm_get_mfn          44
 #define __HYPERVISOR_hsm_free_mfn         45
 #define __HYPERVISOR_perfctr_op           46
+#define __HYPERVISOR_set_hetero_param_op  47
 
 
 /* Architecture-specific hypercall definitions. */

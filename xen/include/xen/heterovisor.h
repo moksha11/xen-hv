@@ -54,6 +54,17 @@ struct perf_ctrs{
 	bool_t core_type;
 };
 
+struct hetero_params{
+	uint64_t clock_period_ms;
+	uint64_t shrink_freq;
+	uint64_t max_hot_scan;
+	uint64_t max_temp_hot_scan;
+	uint64_t usesharedmem;
+};
+typedef struct hetero_params hetero_params_t;
+DEFINE_XEN_GUEST_HANDLE(hetero_params_t);
+
+
 struct counters{
 	uint64_t dinst;
 	uint64_t dcycles;
@@ -97,6 +108,6 @@ void enable_hetero_visor(int arg, int arg2);
 long read_perfctr(int op, XEN_GUEST_HANDLE(void) arg);
 int hsm_trylock();
 int hsm_unlock();
-
+long set_hetero_param_op(int op, XEN_GUEST_HANDLE(hetero_params_t)arg);
 #endif
 

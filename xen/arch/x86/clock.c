@@ -345,7 +345,7 @@ int clear_abit_leaf(struct page_table *pt, s_time_t now)
 		FTABLE_TIME(mfn) = (now >> 20);	// TODO: wrap up??
 
 #ifdef ENABLE_HOT_PAGES
-#define THRESHOLD_HOT 2
+#define THRESHOLD_HOT 10
 		int hotness = bitcount(FTABLE_ABIT(mfn));
 		if (hotness_prev < THRESHOLD_HOT && hotness >= THRESHOLD_HOT) {	// this throttles # of pages entering hot list..
 			//printk("Adding mfn to hotlist \n");

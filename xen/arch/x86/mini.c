@@ -1019,6 +1019,23 @@ void system_wide_destroy(void)
 	myprintk("end of system_wide_destroy\n");
 }
 
+
+
+void reconfigure_hotpage_params(int clockms, unsigned int maxscan, 
+				unsigned int maxtempscan, unsigned int sharedmem){
+	clock_period_ms = clockms;
+	max_scan_arg = maxscan;
+	max_temp_scan_arg = maxtempscan;
+	use_shared_mem = sharedmem;
+
+   printk("clock_period_ms: %lu, max_scan_arg: %lu ,"
+          "max_temp_scan_arg: %lu, usesharedmem %u\n",
+          clock_period_ms, max_scan_arg,
+          max_temp_scan_arg, use_shared_mem);
+	enable_sharedmem(use_shared_mem);	
+}
+
+
 char cpustr[1024];
 void print_pcpus()
 {
@@ -1104,7 +1121,7 @@ void system_wide_init(void)
 	}
 #else
 	{
-		clock_period_ms = 100;
+		clock_period_ms = 1000;
 		machine_name = "Vishal's machine";
 		max_proc = 0;
 		max_cache = 1;

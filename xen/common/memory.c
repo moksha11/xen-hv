@@ -30,6 +30,8 @@
 #include <public/memory.h>
 #include <xsm/xsm.h>
 #include <xen/trace.h>
+#include <mini.h>
+
 
 #define HETEROMEM
 #include <asm/spinlock.h>
@@ -40,13 +42,14 @@ static unsigned int guest_startidx;
 static unsigned int guest_stopidx;
 atomic_t disabl_shrink_hotpg;
 
-#define MAX_HOT_MFNS 128000
-#define MAX_HOT_MFNS_GUEST 128000
+#define MAX_HOT_MFNS 256000
+#define MAX_HOT_MFNS_GUEST 256000
 #define _USE_SHAREDMEM
+//#define ENABLE_DRF
 
 
 PAGE_LIST_HEAD(in_hotskip_list);
-static unsigned int *hotmfns;
+static unsigned int *hotmfns[MAX_HETERO_VM];
 
 struct memop_args {
     /* INPUT */
@@ -60,6 +63,98 @@ struct memop_args {
     unsigned int nr_done;    /* Number of extents processed so far. */
     int          preempted;  /* Was the hypercall preempted? */
 };
+
+//Sanitize and clean this DRF code
+#ifdef ENABLE_DRF
+#define NUM_USERS 2
+#define NUM_RESOURCES 2
+#define MAX_CAPACITY 10000
+#define DRAM 0
+#define NVM 1
+
+static int drfinit;
+
+typedef struct _vms {
+  unsigned int demands[NUM_RESOURCES];
+  unsigned int given[NUM_RESOURCES];
+  float dominant_share;
+} vms;
+
+typedef struct _resource {
+    unsigned int cap;      /* capacity of resource */
+    unsigned int used;     /* resources used so far */
+} resource;
+
+vms vmdrf[MAX_PROC];
+resource vmrsrc[MAX_PROC];
+
+vms * const get_next_user(vms *vmarr) {
+    float cur_min = MAX_CAPACITY;
+    unsigned int u = 0;
+
+    for (unsigned int i = 0; i < NUM_USERS; ++i) {
+        if (vmarr[i].dominant_share <= cur_min) {
+            cur_min = vmarr[i].dominant_share;
+            u = i;
+        }
+    }
+    return &vmarr[u];
+}
+
+int 
+schedule_resource(unsigned int domid, unsigned int rsrcid) {
+
+    unsigned int req_possible = 1;
+
+    if(domid >= MAX_PROC)
+      return -1;
+   
+    if(rsrcid >= NUM_RESOURCES)
+      return -1;
+
+    //increment by one for a page allocation demand
+    vmdrf[domid].demands[rsrcid] = 1;    	
+
+    if (vmrsrc[rsrcid].used + vmdrf[domid].demands[rsrcid] > vmrsrc[rsrcid].cap) {
+      req_possible = 0;
+    }
+
+    if (!req_possible) {
+      return -1;
+    }
+
+    float max_share = 0;
+    float temp_share = 0;
+
+    if (req_possible == 1) {	
+        vmrsrc[rsrcid].used += vmdrf[domid].demands[rsrcid];
+        vmdrf[domid].given[rsrcid] += vmdrf[domid].demands[rsrcid];
+        /*printk("curr_vm->given[%d]: %u, resrc[%d].cap %u "
+               "curr_vm->demands[%d]: %u\n", 
+	        rsrcid, curr_vm->given[rsrcid], rsrcid, resrc[rsrcid].cap, 
+                rsrcid, curr_vm->demands[rsrcid]);*/
+	if(vmrsrc[rsrcid].cap > 0) {
+	    temp_share = (float)((float)vmdrf[domid].given[rsrcid]/(float)vmrsrc[rsrcid].cap);
+           if (temp_share > vmdrf[domid].dominant_share) {
+	     vmdrf[domid].dominant_share = temp_share;
+          }
+	}
+    }
+    return 0;    	
+}
+
+//int main(void) {
+int init_drf(void) {
+    
+    if(drfinit){
+      return 0;
+    }
+    drfinit = 1;
+    vmrsrc[FAST_MEMORY_NODE].cap = 50000;
+    vmrsrc[SLOW_MEMORY_NODE].cap = 4000000;
+    return 0;
+}
+#endif
 
 static void increase_reservation(struct memop_args *a)
 {
@@ -109,162 +204,182 @@ static void increase_reservation(struct memop_args *a)
 
 int hetero_chckskip_page(struct page_info *page, unsigned long curr){
 
-	struct page_info *inpage;
-	unsigned long mfn =0;
+  struct page_info *inpage;
+  unsigned long mfn =0;
 
-	page_list_for_each(inpage, &in_hotskip_list)	
-		if(inpage){
-			mfn = page_to_mfn(inpage);
-			//printk("hetero_chckskip_page:inpage %lu, curr %lu \n",
-			//		mfn, curr);
-			if(inpage == page){
-				return 1; 
-			}
-		}
+  page_list_for_each(inpage, &in_hotskip_list)  
+    if(inpage){
+      mfn = page_to_mfn(inpage);
+      //printk("hetero_chckskip_page:inpage %lu, curr %lu \n",
+      //    mfn, curr);
+      if(inpage == page){
+        return 1; 
+      }
+    }
 
-	return -1;
+  return -1;
 }
 
-int check_if_valid_domain_pg(unsigned int mfn) {
+int check_if_valid_domain_pg(unsigned int mfn, int *domid) {
 
-	struct domain *vm = page_get_owner(__mfn_to_page(mfn));
+  struct domain *vm = page_get_owner(__mfn_to_page(mfn));
     if (vm) {
         int vm_id = vm->domain_id;
         if (vm_id > 0 && vm_id < MAX_HETERO_VM) { //&& (vm_id%2 !=0)) {
-			return 0;
-		}
-	}
-	return -1;
+      *domid = vm_id;
+      return 0;
+    }
+  }
+  *domid = -1;
+  return -1;
  }
+
+int check_valid_domain(struct domain *vm) {
+
+    if (vm) {
+        int vm_id = vm->domain_id;
+        if (vm_id > 0 && vm_id < MAX_HETERO_VM) { 
+      return 0;
+    }
+  }
+  return -1;
+ }
+
+
+
+void enable_sharedmem(int sharedmem){
+  use_shared_mem = sharedmem;
+}
 
 int add_hotpage_tolist(struct page_info *page, unsigned int mfn) {
 
-	unsigned int idx=0;
-	size_t size=0;	
+  unsigned int idx=0;
+  size_t size=0;  
+  int domid=-1;
 
-	//if(pages_added >= MAX_HOT_MFNS)
-	//	return 0; 
+  //if(pages_added >= MAX_HOT_MFNS)
+  //  return 0; 
 
-	//printk("calling add_hotpage_tolist ...1\n");
-	if(atomic_read(&disabl_shrink_hotpg))
+  //printk("calling add_hotpage_tolist ...1\n");
+  if(atomic_read(&disabl_shrink_hotpg))
         return 0;
-	
-	//failure if return is > 0
-	if(check_if_valid_domain_pg(mfn))
-		return 0;
+  
+  //failure if return is > 0
+  if(check_if_valid_domain_pg(mfn, &domid))
+    return 0;
 
 #ifdef _USE_SHAREDMEM
-	    hsm_add_mfn(mfn, pages_added);
-		pages_added++;
-		//printk("add_hotpage_tolist: hotmfns %u \n",pages_added);
-		return 0;
+   //if(use_shared_mem) {
+      hsm_add_mfn(mfn, pages_added);
+      pages_added++;
+      //printk("shared_mem: add_hotpage_tolist: hotmfns %u \n",pages_added);
+      return 0;
+   //}
 #endif
 
-	if(!hotmfns){
-	  size = MAX_HOT_MFNS;	
-	  hotmfns = xmalloc_array(unsigned int*, size*sizeof(unsigned int));
-	  if(!hotmfns)	
-		printk("add_hotpage_tolist: hotmfns allocation failed \n");
-	}
+  if(!hotmfns[domid]){
+    size = MAX_HOT_MFNS;  
+    hotmfns[domid] = xmalloc_array(unsigned int*, size*sizeof(unsigned int));
+    if(!hotmfns[domid])  
+    printk("add_hotpage_tolist: hotmfns allocation failed \n");
+  }
 
- 	if(hotmfns){
+   if(hotmfns[domid]){
         idx = pages_added % MAX_HOT_MFNS;
-		hotmfns[idx] = mfn;
-		pages_added++;
+    hotmfns[domid][idx] = mfn;
+    pages_added++;
     }
-	return 0;
+  return 0;
 }
 
 
 static void hetero_get_hotpage(struct memop_args *a, struct xen_hetero_memory_reservation *reservation)
 {
-    struct page_info *page, *inpage;
-    unsigned int i=0, idx=0, j=0, itr=0;
-    xen_pfn_t gpfn, mfn;
+  struct page_info *page, *inpage;
+  unsigned int i=0, idx=0, j=0, itr=0;
+  xen_pfn_t gpfn, mfn;
+  struct domain *d = a->domain;
+  int domid = -1;
+
+   if(check_valid_domain(d))
+    goto out;
+
+   domid = d->domain_id;
 
 #ifdef _USE_SHAREDMEM
-	if(atomic_read(&disabl_shrink_hotpg)) {
-		//pages_added=0;
-		//hsm_add_mfn(0,0);
-		//hsm_reset_idx();
-   		atomic_set(&disabl_shrink_hotpg, 0);
-	}
-	else{
-		atomic_set(&disabl_shrink_hotpg, 1);	
-		hsm_add_mfn(0,pages_added);
-	}
-	a->nr_done = 0;
-	return;
+  if(atomic_read(&disabl_shrink_hotpg)) {
+    //pages_added=0;
+    //hsm_add_mfn(0,0);
+    //hsm_reset_idx();
+    atomic_set(&disabl_shrink_hotpg, 0);
+  }
+  else{
+    atomic_set(&disabl_shrink_hotpg, 1);  
+    hsm_add_mfn(0,pages_added);
+  }
+  a->nr_done = 0;
+  return;
 #else
-	atomic_set(&disabl_shrink_hotpg, 1);
+  atomic_set(&disabl_shrink_hotpg, 1);
 #endif
 
-	if(!hotmfns){
-	  goto out;
-	}
+  if(!hotmfns[domid]){
+    goto out;
+  }
 
-	i=0;
-	a->nr_done = i;
-	guest_startidx = 0;
+  i=0;
+  a->nr_done = i;
+  guest_startidx = 0;
 
-	guest_stopidx = (guest_startidx + MAX_HOT_MFNS_GUEST -1) % MAX_HOT_MFNS ;
+  guest_stopidx = (guest_startidx + MAX_HOT_MFNS_GUEST -1) % MAX_HOT_MFNS ;
 
-	if(guest_stopidx > pages_added)
-		guest_stopidx = pages_added;
+  if(guest_stopidx > pages_added)
+    guest_stopidx = pages_added;
+   //atomic_set(&disabl_shrink_hotpg, 1);
+   for(idx=guest_startidx; idx< guest_stopidx; idx++) {
 
-	 //atomic_set(&disabl_shrink_hotpg, 1);
-	 for(idx=guest_startidx; idx< guest_stopidx; idx++) {
+    if ( !guest_handle_is_null(a->extent_list) ){
 
-		if ( !guest_handle_is_null(a->extent_list) ){
+           mfn = hotmfns[domid][idx];
+      hotmfns[domid][idx]=0;
 
-         	mfn = hotmfns[idx];
-			hotmfns[idx]=0;
-
-			if(!mfn) {
-				//printk("hetero_get_hotpage: invalid mfn hotmfns[%u]:%u\n", 
-			 	//					mfn, hotmfns[idx]);
-				continue;
-			 }
-			 //gpfn = get_gpfn_from_mfn(mfn);
-			 //printk("hetero_get_hotpage: hotmfns[%u]:%u, gpfn %u\n",     
-             //		idx, hotmfns[idx], get_gpfn_from_mfn(hotmfns[idx]));
-        	 if(unlikely(__copy_to_guest_offset(a->extent_list,i++,&mfn, 1))){
-				//printk("__copy_to_guest_offset failed \n");
-		 	 } 
-			//hotmfns[idx]=0;
-		}
+      if(!mfn) {
+        //printk("hetero_get_hotpage: invalid mfn hotmfns[%u]:%u\n", 
+         //          mfn, hotmfns[idx]);
+        continue;
+       }
+       //gpfn = get_gpfn_from_mfn(mfn);
+       //printk("hetero_get_hotpage: hotmfns[%u]:%u, gpfn %u\n",     
+             //    idx, hotmfns[idx], get_gpfn_from_mfn(hotmfns[idx]));
+           if(unlikely(__copy_to_guest_offset(a->extent_list,i++,&mfn, 1))){
+        //printk("__copy_to_guest_offset failed \n");
+        } 
+      //hotmfns[idx]=0;
     }
-	printk("hetero_get_hotpage:start idx %u, end idx %u\n",
-				guest_startidx, guest_stopidx);
-	//guest_startidx = (guest_startidx + idx + 1)% MAX_HOT_MFNS;
-	guest_startidx = (guest_stopidx + 1)% MAX_HOT_MFNS;
-
+    }
+  printk("hetero_get_hotpage:start idx %u, end idx %u\n",
+        guest_startidx, guest_stopidx);
+  //guest_startidx = (guest_startidx + idx + 1)% MAX_HOT_MFNS;
+  guest_startidx = (guest_stopidx + 1)% MAX_HOT_MFNS;
 out:
-	/*reset pages to 0*/
-	pages_added = 0;
-
-    /*set to 0 after the hypercall*/
-    atomic_set(&disabl_shrink_hotpg, 0);
-
-	a->nr_done = i;
-
-	return 0;
+  /*reset pages to 0*/
+  pages_added = 0;
+  /*set to 0 after the hypercall*/
+  atomic_set(&disabl_shrink_hotpg, 0);
+  a->nr_done = i;
 }
 
 
 /* */
 static void hetero_hotpage_hints(struct memop_args *a, struct xen_hetero_memory_reservation *reservation)
 {
-    struct page_info *page;
     unsigned long i, j;
-    xen_pfn_t gpfn, mfn;
+    xen_pfn_t gpfn;
     struct domain *d = a->domain;
 
     if ( !guest_handle_subrange_okay(a->extent_list, a->nr_done,
                                      a->nr_extents-1) )
         return;
-
-	//printk(KERN_DEBUG "hetero_hotpage_hints: %u \n", a->nr_extents);
 
     for ( i = a->nr_done; i < a->nr_extents; i++ )
     {
@@ -276,17 +391,17 @@ static void hetero_hotpage_hints(struct memop_args *a, struct xen_hetero_memory_
 
         if ( unlikely(__copy_from_guest_offset(&gpfn, a->extent_list, i, 1)) ){
             goto out;
-		}
-		//printk("hetero_hotpage_hints: copying from guests %lu \n",
-		//	(unsigned long)gpfn);
+    }
+    //printk("hetero_hotpage_hints: copying from guests %lu \n",
+    //  (unsigned long)gpfn);
 
-		/*page = mfn_to_page(pfn_to_mfn(gpfn));
-		if(!page){
-			printk("hetero_hotpage_hints: page is NULL\n");	
-			continue;	
-		}else {
-			 printk("hetero_hotpage_hints: page is not NULL\n");
-		}*/
+    /*page = mfn_to_page(pfn_to_mfn(gpfn));
+    if(!page){
+      printk("hetero_hotpage_hints: page is NULL\n");  
+      continue;  
+    }else {
+       printk("hetero_hotpage_hints: page is not NULL\n");
+    }*/
 
        struct page_info *page;
 #ifdef CONFIG_X86
@@ -303,10 +418,6 @@ static void hetero_hotpage_hints(struct memop_args *a, struct xen_hetero_memory_
 #else
     mfn = gmfn_to_mfn(d, gpfn);
 #endif
-
-    //printk("hetero_hotpage_hints: after extracting mfn "  
-	  //    "gpfn %lu, mfn %lu \n",gpfn, mfn);
-
     if ( unlikely(!mfn_valid(mfn)) )
     {
         printk(XENLOG_INFO, "Domain %u page number %lx invalid\n",
@@ -314,24 +425,21 @@ static void hetero_hotpage_hints(struct memop_args *a, struct xen_hetero_memory_
         return 0;
     }
 #if 1
-  	  page = mfn_to_page(mfn);
-	  if(page){
-	    page_list_add(page, &in_hotskip_list);
-		j++;
-	  }
-	  else { 
-        printk("hetero_hotpage_hints: mfn_to_page is NULL \n");
-      }
+    page = mfn_to_page(mfn);
+    if(page){
+      page_list_add(page, &in_hotskip_list);
+      j++;
+    }
+    else { 
+      printk("hetero_hotpage_hints: mfn_to_page is NULL \n");
+    }
 #endif
 
-	}
+  }
 out:
-	printk("hetero_hotpage_hints:page added to lists %u\n",j);
+    printk("hetero_hotpage_hints:page added to lists %u\n",j);
     a->nr_done = i;
 }
-
-
-
 
 #if 0
 /* HetroMem HETEROMEMFIX: Hardcoding node for now. Need to fix the bug of getting the right way to 
@@ -342,7 +450,7 @@ static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memo
     unsigned long i, j;
     xen_pfn_t gpfn, mfn;
     struct domain *d = a->domain;
-	unsigned int start_pages = 0;
+  unsigned int start_pages = 0;
 
     if ( !guest_handle_subrange_okay(a->extent_list, a->nr_done,
                                      a->nr_extents-1) )
@@ -351,12 +459,12 @@ static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memo
     if ( !multipage_allocation_permitted(current->domain, a->extent_order) )
         return;
 
-	/*if(d->domain_id == 1){
-		printk(KERN_DEBUG "*************nr_extents requested map:%d*****************\n",a->nr_extents);
-	}*/
+  /*if(d->domain_id == 1){
+    printk(KERN_DEBUG "*************nr_extents requested map:%d*****************\n",a->nr_extents);
+  }*/
 
-	if(d && d->domain_id > 0)
-		start_pages = d->tot_pages;
+  if(d && d->domain_id > 0)
+    start_pages = d->tot_pages;
 
 
     for ( i = a->nr_done; i < a->nr_extents; i++ )
@@ -372,24 +480,24 @@ static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memo
 
         if ( a->memflags & MEMF_populate_on_demand )
         {
-			printk("hetero_populate_physmap: guest_physmap_mark_populate_on_demand\n");
+      printk("hetero_populate_physmap: guest_physmap_mark_populate_on_demand\n");
             if ( guest_physmap_mark_populate_on_demand(d, gpfn,
                                                        a->extent_order) < 0 )
                 goto out;
         }
         else
         {
-			//if(d && d->domain_id == 1){
-			//	printk(KERN_DEBUG "populate_physmap: memflags %u, gpfn %u\n",
-			//			reservation->mem_flags, gpfn);
-			//}
+      //if(d && d->domain_id == 1){
+      //  printk(KERN_DEBUG "populate_physmap: memflags %u, gpfn %u\n",
+      //      reservation->mem_flags, gpfn);
+      //}
 //#ifdef ENABLE_MULTI_NODE
-			if(d && d->domain_id > 0){
-				page = alloc_domheap_pages(d, a->extent_order, (a->memflags | MEMF_node(SLOW_MEMORY_NODE) | MEMF_exact_node));
-				printk("hetero_populate_physmap: allocating from memory node %u \n",SLOW_MEMORY_NODE);
-			}
+      if(d && d->domain_id > 0){
+        page = alloc_domheap_pages(d, a->extent_order, (a->memflags | MEMF_node(FAST_MEMORY_NODE) | MEMF_exact_node));
+        printk("hetero_populate_physmap: allocating from memory node %u \n",FAST_MEMORY_NODE);
+      }
 //#else
-//			printk("hetero_populate_physmap: alloc_domheap_pages \n");
+//      printk("hetero_populate_physmap: alloc_domheap_pages \n");
             page = alloc_domheap_pages(d, a->extent_order, a->memflags);
 //#endif
             if ( unlikely(page == NULL) ) 
@@ -404,11 +512,11 @@ static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memo
             mfn = page_to_mfn(page);
             guest_physmap_add_page(d, gpfn, mfn, a->extent_order);
 #ifdef HETERODEBUG
-			if(d && d->domain_id >= 1){
-				printk(KERN_DEBUG "populate_physmap: added page to guest gpfn:  %lu "
-								  "mfn: %u, extent_order: %u\n ",
-								  (unsigned int)gpfn, (unsigned int)mfn, a->extent_order);
-			}
+      if(d && d->domain_id >= 1){
+        printk(KERN_DEBUG "populate_physmap: added page to guest gpfn:  %lu "
+                  "mfn: %u, extent_order: %u\n ",
+                  (unsigned int)gpfn, (unsigned int)mfn, a->extent_order);
+      }
 #endif
 
             if ( !paging_mode_translate(d) )
@@ -420,16 +528,16 @@ static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memo
                 if ( unlikely(__copy_to_guest_offset(a->extent_list, i, &mfn, 1)) )
                     goto out;
 #ifdef HETERODEBUG
-				/*if(d && d->domain_id == 1){
-					printk(KERN_DEBUG "copy page to extent list:  %lu "
-								  "mfn: %u, extent_order: %u\n ",
-								  (unsigned int)gpfn + j, (unsigned int)mfn + j, a->extent_order);
-				}*/
+        /*if(d && d->domain_id == 1){
+          printk(KERN_DEBUG "copy page to extent list:  %lu "
+                  "mfn: %u, extent_order: %u\n ",
+                  (unsigned int)gpfn + j, (unsigned int)mfn + j, a->extent_order);
+        }*/
 #endif
             }
         }
     }
-	printk("NUMA page alloc:%d %u %u\n",i, d->tot_pages, start_pages);
+  printk("NUMA page alloc:%d %u %u\n",i, d->tot_pages, start_pages);
 
 out:
     a->nr_done = i;
@@ -449,7 +557,7 @@ static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memo
     if ( !multipage_allocation_permitted(current->domain, a->extent_order) )
         return;
 
-	/*printk("*************vishal map:%d*****************\n",a->nr_extents);*/
+  /*printk("*************vishal map:%d*****************\n",a->nr_extents);*/
     for ( i = a->nr_done; i < a->nr_extents; i++ )
     {
         if ( hypercall_preempt_check() )
@@ -470,37 +578,42 @@ static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memo
         else
         {
 //#ifdef ENABLE_MULTI_NODE
-			//if(d && d->domain_id > 0){
-			page = alloc_domheap_pages(d, a->extent_order, (a->memflags | MEMF_node(SLOW_MEMORY_NODE) | MEMF_exact_node ));
-			//}
-//#else
-            //page = alloc_domheap_pages(d, a->extent_order, a->memflags);
-//#endif
-            if ( unlikely(page == NULL) ) 
-            {
-                if ( !opt_tmem || (a->extent_order != 0) )
-                    gdprintk(XENLOG_INFO, "Could not allocate order=%d extent:"
-                             " id=%d memflags=%x (%ld of %d)\n",
-                             a->extent_order, d->domain_id, a->memflags,
-                             i, a->nr_extents);
-                goto out;
-            }
+#ifdef ENABLE_DRF
+      init_drf();
+      if(d && d->domain_id > 0) {
+        if (schedule_resource((unsigned int)d->domain_id, (unsigned int)SLOW_MEMORY_NODE)) { 		
+          page = alloc_domheap_pages(d, a->extent_order, a->memflags);
+          goto skipmultinode;          
+        }
+      }
+#endif
+    page = alloc_domheap_pages(d, a->extent_order, (a->memflags | MEMF_node(SLOW_MEMORY_NODE) | MEMF_exact_node ));
+skipmultinode:
+    if ( unlikely(page == NULL) ) 
+    {
+	if ( !opt_tmem || (a->extent_order != 0) )
+	    gdprintk(XENLOG_INFO, "Could not allocate order=%d extent:"
+		     " id=%d memflags=%x (%ld of %d)\n",
+		     a->extent_order, d->domain_id, a->memflags,
+		     i, a->nr_extents);
+	goto out;
+    }
 
-            mfn = page_to_mfn(page);
-            guest_physmap_add_page(d, gpfn, mfn, a->extent_order);
+    mfn = page_to_mfn(page);
+    guest_physmap_add_page(d, gpfn, mfn, a->extent_order);
 
-            if ( !paging_mode_translate(d) )
-            {
-                for ( j = 0; j < (1 << a->extent_order); j++ )
-                    set_gpfn_from_mfn(mfn + j, gpfn + j);
+    if ( !paging_mode_translate(d) )
+    {
+	for ( j = 0; j < (1 << a->extent_order); j++ )
+	    set_gpfn_from_mfn(mfn + j, gpfn + j);
 
-                /* Inform the domain of the new page's machine address. */ 
-                if ( unlikely(__copy_to_guest_offset(a->extent_list, i, &mfn, 1)) )
-                    goto out;
-            }
+	/* Inform the domain of the new page's machine address. */ 
+	if ( unlikely(__copy_to_guest_offset(a->extent_list, i, &mfn, 1)) )
+	    goto out;
+    }
         }
     }
-	printk("NUMA page alloc:%d %u\n",i, d->tot_pages);
+  printk("NUMA page alloc:%d %u\n",i, d->tot_pages);
 
 out:
     a->nr_done = i;
@@ -521,7 +634,7 @@ static void populate_physmap(struct memop_args *a)
     if ( !multipage_allocation_permitted(current->domain, a->extent_order) )
         return;
 
-	/*printk("*************vishal map:%d*****************\n",a->nr_extents);*/
+  /*printk("*************vishal map:%d*****************\n",a->nr_extents);*/
     for ( i = a->nr_done; i < a->nr_extents; i++ )
     {
         if ( hypercall_preempt_check() )
@@ -542,9 +655,9 @@ static void populate_physmap(struct memop_args *a)
         else
         {
 #ifdef ENABLE_MULTI_NODE
-			//if(d && d->domain_id > 0){
-			page = alloc_domheap_pages(d, a->extent_order, (a->memflags | MEMF_node(FAST_MEMORY_NODE) | MEMF_exact_node ));
-			//}
+      //if(d && d->domain_id > 0){
+      page = alloc_domheap_pages(d, a->extent_order, (a->memflags | MEMF_node(FAST_MEMORY_NODE) | MEMF_exact_node ));
+      //}
 #else
             page = alloc_domheap_pages(d, a->extent_order, a->memflags);
 #endif
@@ -572,7 +685,7 @@ static void populate_physmap(struct memop_args *a)
             }
         }
     }
-	printk("NUMA page alloc:%d %u\n",i, d->tot_pages);
+  printk("NUMA page alloc:%d %u\n",i, d->tot_pages);
 
 out:
     a->nr_done = i;
@@ -935,7 +1048,7 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE(void) arg)
     unsigned int address_bits;
     unsigned long start_extent;
     struct xen_memory_reservation reservation;
-	/*HeteroMem Changes*/
+  /*HeteroMem Changes*/
     struct xen_hetero_memory_reservation hetero_reservation;
 
     struct memop_args args;
@@ -956,25 +1069,25 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE(void) arg)
         if ( copy_from_guest(&reservation, arg, 1) )
             return start_extent;
 
-		/* HeteroMem: If HeteroMem, copy the arg to heteromem reservation
-		 * structure */
-		//if (op == XENMEM_hetero_populate_physmap || op == XENMEM_hetero_stop_hotpage_scan) {
-		if (op == XENMEM_hetero_stop_hotpage_scan) {
-			//printk("do_mem_op: XENMEM_hetero_stop_hotpage_scan called step 2\n");
-			if ( copy_from_guest(&hetero_reservation, arg, 1) )
-			    return start_extent;
-		}
+    /* HeteroMem: If HeteroMem, copy the arg to heteromem reservation
+     * structure */
+    //if (op == XENMEM_hetero_populate_physmap || op == XENMEM_hetero_stop_hotpage_scan) {
+    if (op == XENMEM_hetero_stop_hotpage_scan) {
+      //printk("do_mem_op: XENMEM_hetero_stop_hotpage_scan called step 2\n");
+      if ( copy_from_guest(&hetero_reservation, arg, 1) )
+          return start_extent;
+    }
 
         /* Is size too large for us to encode a continuation? */
         if ( reservation.nr_extents > (ULONG_MAX >> MEMOP_EXTENT_SHIFT) )
             return start_extent;
 
-		
-		if(op != XENMEM_hetero_stop_hotpage_scan) {
+    
+    if(op != XENMEM_hetero_stop_hotpage_scan) {
 
-	        if ((unlikely(start_extent >= reservation.nr_extents)) )
-    	        return start_extent;
-		}
+          if ((unlikely(start_extent >= reservation.nr_extents)) )
+              return start_extent;
+    }
 
         args.extent_list  = reservation.extent_start;
         args.nr_extents   = reservation.nr_extents;
@@ -987,18 +1100,16 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE(void) arg)
 #ifdef HETEROMEM
          /*HETEROMEMDEBUG*/
          if ( op == XENMEM_populate_physmap
-         	   && (reservation.mem_flags & XENMEMF_hetero_mem_request) )
+              && (reservation.mem_flags & XENMEMF_hetero_mem_request) )
                 printk(KERN_DEBUG "******Request from guest heteromem \n");
-		 else if((d->domain_id == 1) && (op == XENMEM_populate_physmap)){
-	        printk(KERN_DEBUG "In populate_physmap \n");
-		 }
+     else if((d->domain_id == 1) && (op == XENMEM_populate_physmap)){
+          printk(KERN_DEBUG "In populate_physmap \n");
+     }
 #endif
 #endif
 
-		 //if (op == XENMEM_hetero_populate_physmap || op == XENMEM_hetero_stop_hotpage_scan)
-			//printk("do_mem_op: XENMEM_hetero_stop_hotpage_scan called step 5\n");
-
-
+     //if (op == XENMEM_hetero_populate_physmap || op == XENMEM_hetero_stop_hotpage_scan)
+      //printk("do_mem_op: XENMEM_hetero_stop_hotpage_scan called step 5\n");
         address_bits = XENMEMF_get_address_bits(reservation.mem_flags);
         if ( (address_bits != 0) &&
              (address_bits < (get_order_from_pages(max_page) + PAGE_SHIFT)) )
@@ -1008,15 +1119,14 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE(void) arg)
             args.memflags = MEMF_bits(address_bits);
         }
 
-		 //if (op == XENMEM_hetero_populate_physmap || op == XENMEM_hetero_stop_hotpage_scan)
-			//printk("do_mem_op: XENMEM_hetero_stop_hotpage_scan called step 6\n");
-
+     //if (op == XENMEM_hetero_populate_physmap || op == XENMEM_hetero_stop_hotpage_scan)
+      //printk("do_mem_op: XENMEM_hetero_stop_hotpage_scan called step 6\n");
         args.memflags |= MEMF_node(XENMEMF_get_node(reservation.mem_flags));
         if ( reservation.mem_flags & XENMEMF_exact_node_request )
             args.memflags |= MEMF_exact_node;
 
-		 //if (op == XENMEM_hetero_populate_physmap || op == XENMEM_hetero_stop_hotpage_scan)
-		//	printk("do_mem_op: XENMEM_hetero_stop_hotpage_scan called step 7\n");
+     //if (op == XENMEM_hetero_populate_physmap || op == XENMEM_hetero_stop_hotpage_scan)
+    //  printk("do_mem_op: XENMEM_hetero_stop_hotpage_scan called step 7\n");
 
         if ( op == XENMEM_populate_physmap
              && (reservation.mem_flags & XENMEMF_populate_on_demand) )
@@ -1026,9 +1136,9 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE(void) arg)
              && (reservation.mem_flags & XENMEMF_populate_on_demand) )
             args.memflags |= MEMF_populate_on_demand;
 
-		//if ( op == XENMEM_hetero_stop_hotpage_scan){
-			//printk("XENMEM_hetero_stop_hotpage_scan called \n");	
-		//}
+    //if ( op == XENMEM_hetero_stop_hotpage_scan){
+      //printk("XENMEM_hetero_stop_hotpage_scan called \n");  
+    //}
 
         if ( likely(reservation.domid == DOMID_SELF) )
         {
@@ -1056,24 +1166,24 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE(void) arg)
         switch ( op )
         {
         case XENMEM_increase_reservation:
-			//printk("XENMEM_increase_reservation \n");
+      //printk("XENMEM_increase_reservation \n");
             increase_reservation(&args);
             break;
         case XENMEM_decrease_reservation:
-			//printk("XENMEM_decrease_reservation: \n");
+      //printk("XENMEM_decrease_reservation: \n");
             decrease_reservation(&args);
             break;
-	    case XENMEM_hetero_populate_physmap:
-			//printk("XENMEM_hetero_populate_physmap: \n");
-			hetero_populate_physmap(&args, &hetero_reservation);
-			break;
+      case XENMEM_hetero_populate_physmap:
+      //printk("XENMEM_hetero_populate_physmap: \n");
+      hetero_populate_physmap(&args, &hetero_reservation);
+      break;
 
-		case XENMEM_hetero_stop_hotpage_scan:
-			 //hetero_hotpage_hints(&args, &hetero_reservation);
-			 //printk("do_memory_op: Calling hetero_get_hotpage \n");
-			 hetero_get_hotpage(&args, &hetero_reservation);
-			 //hetero_get_hotpage(guest_handle_cast(arg,  xen_hetero_memory_reservation_t));
-			break;
+    case XENMEM_hetero_stop_hotpage_scan:
+       //hetero_hotpage_hints(&args, &hetero_reservation);
+       //printk("do_memory_op: Calling hetero_get_hotpage \n");
+       hetero_get_hotpage(&args, &hetero_reservation);
+       //hetero_get_hotpage(guest_handle_cast(arg,  xen_hetero_memory_reservation_t));
+      break;
 
         default: /* XENMEM_populate_physmap */
             populate_physmap(&args);
@@ -1139,9 +1249,9 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE(void) arg)
         break;
     }
 
-	//if (op == XENMEM_hetero_populate_physmap || op == XENMEM_hetero_stop_hotpage_scan) {
-	//	printk("do_memory_op: hypercall returns %u\n", rc);
-	//}
+  //if (op == XENMEM_hetero_populate_physmap || op == XENMEM_hetero_stop_hotpage_scan) {
+  //  printk("do_memory_op: hypercall returns %u\n", rc);
+  //}
 
     return rc;
 }

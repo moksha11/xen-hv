@@ -29,7 +29,7 @@
 #include<public/xenoprof.h>
 #endif
 
-#define HETEROPERF
+//#define HETEROPERF
 //#ifdef HETEROPERF
 #define RESET_PERFCOUNT 0
 #define READ_PERFCOUNT 1
@@ -51,7 +51,7 @@
 /*
  * Basic constants
  */
-#define SHRINK_FREQ 10
+#define SHRINK_FREQ 50
 #define CSCHED_DEFAULT_WEIGHT       256
 #define CSCHED_TICKS_PER_TSLICE     3
 #define CSCHED_TICKS_PER_ACCT       3
@@ -1904,7 +1904,7 @@ csched_acct(void* dummy)
 	//}
 
 	if(hetero_debug_tick >= DEBUG_TICK_COUNT && hetero_visor_active){
-		print_heartbeat_msg();
+		//print_heartbeat_msg();
 		hetero_debug_tick = 0 ;
 	}
 
@@ -2349,7 +2349,7 @@ csched_tick(void *_cpu)
 		if (MY_MASTER == cpu) {
 #ifdef HETEROPERF
 #else
-			pcpu_stat();
+			//pcpu_stat();
 #endif
 		}
 	}
@@ -3571,6 +3571,29 @@ uint16_t change_estate(int resource, int state, XEN_GUEST_HANDLE(void) cap)
 	}
 	return 0;
 }
+
+long set_hetero_param_op(int op, XEN_GUEST_HANDLE(hetero_params_t) arg){
+
+	struct hetero_params param;
+
+        if (copy_from_guest(&param, arg, 1))
+            return -EFAULT;
+
+	clock_period_ms = param.clock_period_ms;	
+
+
+	printk("clock_period_ms: %lu, shrink_freq: %lu ," 
+		"max_hot_scan: %lu, usesharedmem %u\n",
+		param.clock_period_ms, param.shrink_freq, 
+		param.max_hot_scan, param.usesharedmem);
+
+	reconfigure_hotpage_params(param.clock_period_ms, 
+				   param.max_hot_scan, 
+				   param.max_temp_hot_scan,
+				   param.usesharedmem);
+	return 0;
+}
+
 
 long read_perfctr(int op, XEN_GUEST_HANDLE(void) arg){
 	struct vcpu * v = current;

@@ -720,6 +720,7 @@ ENTRY(hypercall_table)
         .quad do_hsm_get_mfn
         .quad do_hsm_free_mfn
 	.quad do_perfctr_op
+	.quad do_set_hetero_param_op
         .rept __HYPERVISOR_arch_0-((.-hypercall_table)/8)
         .quad do_ni_hypercall
         .endr
@@ -771,6 +772,7 @@ ENTRY(hypercall_args_table)
         .byte 5 /* do_myhypercall	*/
         .byte 5 /* do_myhcall_op           */
         .byte 2 /* do_perfctr_op           */
+	.byte 2 /* do_set_hetero_param_op*/
         .byte 2 /* do_estate_op*/
         .byte 2 /* do_alloc_hetero_op    */
         .byte 1 /* do_hsm_get_mfn        */
