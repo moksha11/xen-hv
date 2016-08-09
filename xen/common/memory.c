@@ -42,7 +42,8 @@ atomic_t disabl_shrink_hotpg;
 
 #define MAX_HOT_MFNS 128000
 #define MAX_HOT_MFNS_GUEST 128000
-#define _USE_SHAREDMEM
+//#define _USE_SHAREDMEM
+#define ENABLE_DRF
 
 
 PAGE_LIST_HEAD(in_hotskip_list);
@@ -60,6 +61,121 @@ struct memop_args {
     unsigned int nr_done;    /* Number of extents processed so far. */
     int          preempted;  /* Was the hypercall preempted? */
 };
+
+//Sanitize and clean this DRF code
+#ifdef ENABLE_DRF
+#define NUM_USERS 2
+#define NUM_RESOURCES 2
+#define MAX_CAPACITY 10000
+#define DRAM 0
+#define NVM 1
+#define MAXVMS 20
+
+static int drfinit;
+
+typedef struct _vms {
+  unsigned int demands[NUM_RESOURCES];
+  unsigned int given[NUM_RESOURCES];
+  unsigned int reserved[NUM_RESOURCES];
+  long excess[NUM_RESOURCES];
+  unsigned int dominant_share;
+} vms;
+
+typedef struct _resource {
+    unsigned int cap;      /* capacity of resource */
+    unsigned int used;     /* resources used so far */
+} resource;
+
+vms DRF[MAXVMS];
+resource resources[MAXVMS];
+
+vms * const get_next_user(vms *vmarr) {
+    float cur_min = MAX_CAPACITY;
+    unsigned int u = 0;
+
+    for (unsigned int i = 0; i < NUM_USERS; ++i) {
+        if (vmarr[i].dominant_share <= cur_min) {
+            cur_min = vmarr[i].dominant_share;
+            u = i;
+        }
+    }
+    return &vmarr[u];
+}
+
+/*Find the excess allocation by a VM 
+* Used by the ballooning mechanism*/
+void
+excess_allocation(unsigned int domid, unsigned int rsrcid){
+
+    long actual_share = 0, current_share = 0;
+    actual_share = (DRF[domid].reserved[rsrcid] * 100 / resources[rsrcid].cap);
+    current_share = (DRF[domid].given[rsrcid] * 100 / resources[rsrcid].cap);
+    DRF[domid].excess[rsrcid] = current_share - actual_share;
+    gdprintk(XENLOG_INFO, "Excess DRF[%u].excess[%u]: %ld, actual_share %ld, current_share %ld \n", 
+ 	     domid, rsrcid, DRF[domid].excess[rsrcid], actual_share, current_share); 
+}
+
+/*Schedule resource allocation based on DRF shares*/
+int 
+schedule_resource(unsigned int domid, unsigned int rsrcid) {
+
+    unsigned int req_possible = 1;
+    unsigned int temp_share = 0;
+
+    if(domid >= MAXVMS || rsrcid >= NUM_RESOURCES || !resources[rsrcid].cap)
+      return -1;
+
+    //increment by one for a page allocation demand
+    DRF[domid].demands[rsrcid] += 1;    	
+
+    if (resources[rsrcid].used + DRF[domid].demands[rsrcid] > resources[rsrcid].cap) {
+      req_possible = 0;
+      return -1;	
+    }
+    if (req_possible == 1) {	
+        resources[rsrcid].used += 1;  //DRF[domid].demands[rsrcid];
+        DRF[domid].given[rsrcid] += 1; //DRF[domid].demands[rsrcid];
+        temp_share = (DRF[domid].given[rsrcid] *100) /resources[rsrcid].cap; 	
+        if (temp_share > DRF[domid].dominant_share) {
+	     DRF[domid].dominant_share = temp_share;
+        }
+        gdprintk(XENLOG_INFO, "resources[%d].used %u, DRF[%d].demands[%d]  %u," 
+                "resources[%d].cap %u DRF[%u].given[%u] %u, temp_share %u\n",
+	         rsrcid, resources[rsrcid].used, domid, rsrcid, DRF[domid].demands[rsrcid],
+	         rsrcid, resources[rsrcid].cap, domid, rsrcid, DRF[domid].given[rsrcid], 
+	         temp_share);
+	/*Calculate excess shares*/
+        excess_allocation(domid, rsrcid); 
+    }
+    return 0;    	
+}
+
+
+int init_drf(void) {
+
+    int i = 0, j = 0;
+    if(drfinit){
+      return 0;
+    }
+    drfinit = 1;
+    resources[FAST_MEMORY_NODE].cap = 1000000;
+    resources[SLOW_MEMORY_NODE].cap = 200000;
+
+    for ( i=0; i < MAXVMS; i++) {
+        for ( j=0; j < NUM_RESOURCES; j++) {	
+	    resources[j].used = 0;
+	    DRF[i].demands[j] = 0;
+	    DRF[i].given[j] = 0;
+	    /*Some hardcoding for setting max
+	    resources limits*/
+	    DRF[i].reserved[j] =  resources[j].cap/2;
+            gdprintk(XENLOG_INFO, "DRF[%d].reserved[%d]: %u \n",i, j, DRF[i].reserved[j]); 
+        }	
+    }
+    return 0;
+}
+#endif
+
 
 static void increase_reservation(struct memop_args *a)
 {
@@ -332,109 +448,6 @@ out:
 
 
 
-
-#if 0
-/* HetroMem HETEROMEMFIX: Hardcoding node for now. Need to fix the bug of getting the right way to 
-* interpret the node argument from guest. currently the memglag argument is NULL*/
-static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memory_reservation *reservation)
-{
-    struct page_info *page;
-    unsigned long i, j;
-    xen_pfn_t gpfn, mfn;
-    struct domain *d = a->domain;
-	unsigned int start_pages = 0;
-
-    if ( !guest_handle_subrange_okay(a->extent_list, a->nr_done,
-                                     a->nr_extents-1) )
-        return;
-
-    if ( !multipage_allocation_permitted(current->domain, a->extent_order) )
-        return;
-
-	/*if(d->domain_id == 1){
-		printk(KERN_DEBUG "*************nr_extents requested map:%d*****************\n",a->nr_extents);
-	}*/
-
-	if(d && d->domain_id > 0)
-		start_pages = d->tot_pages;
-
-
-    for ( i = a->nr_done; i < a->nr_extents; i++ )
-    {
-        if ( hypercall_preempt_check() )
-        {
-            a->preempted = 1;
-            goto out;
-        }
-
-        if ( unlikely(__copy_from_guest_offset(&gpfn, a->extent_list, i, 1)) )
-            goto out;
-
-        if ( a->memflags & MEMF_populate_on_demand )
-        {
-			printk("hetero_populate_physmap: guest_physmap_mark_populate_on_demand\n");
-            if ( guest_physmap_mark_populate_on_demand(d, gpfn,
-                                                       a->extent_order) < 0 )
-                goto out;
-        }
-        else
-        {
-			//if(d && d->domain_id == 1){
-			//	printk(KERN_DEBUG "populate_physmap: memflags %u, gpfn %u\n",
-			//			reservation->mem_flags, gpfn);
-			//}
-//#ifdef ENABLE_MULTI_NODE
-			if(d && d->domain_id > 0){
-				page = alloc_domheap_pages(d, a->extent_order, (a->memflags | MEMF_node(SLOW_MEMORY_NODE) | MEMF_exact_node));
-				printk("hetero_populate_physmap: allocating from memory node %u \n",SLOW_MEMORY_NODE);
-			}
-//#else
-//			printk("hetero_populate_physmap: alloc_domheap_pages \n");
-            page = alloc_domheap_pages(d, a->extent_order, a->memflags);
-//#endif
-            if ( unlikely(page == NULL) ) 
-            {
-                if ( !opt_tmem || (a->extent_order != 0) )
-                    gdprintk(XENLOG_INFO, "Could not allocate order=%d extent:"
-                             " id=%d memflags=%x (%ld of %d)\n",
-                             a->extent_order, d->domain_id, a->memflags,
-                             i, a->nr_extents);
-                goto out;
-            }
-            mfn = page_to_mfn(page);
-            guest_physmap_add_page(d, gpfn, mfn, a->extent_order);
-#ifdef HETERODEBUG
-			if(d && d->domain_id >= 1){
-				printk(KERN_DEBUG "populate_physmap: added page to guest gpfn:  %lu "
-								  "mfn: %u, extent_order: %u\n ",
-								  (unsigned int)gpfn, (unsigned int)mfn, a->extent_order);
-			}
-#endif
-
-            if ( !paging_mode_translate(d) )
-            {
-                for ( j = 0; j < (1 << a->extent_order); j++ )
-                    set_gpfn_from_mfn(mfn + j, gpfn + j);
-
-                /* Inform the domain of the new page's machine address. */ 
-                if ( unlikely(__copy_to_guest_offset(a->extent_list, i, &mfn, 1)) )
-                    goto out;
-#ifdef HETERODEBUG
-				/*if(d && d->domain_id == 1){
-					printk(KERN_DEBUG "copy page to extent list:  %lu "
-								  "mfn: %u, extent_order: %u\n ",
-								  (unsigned int)gpfn + j, (unsigned int)mfn + j, a->extent_order);
-				}*/
-#endif
-            }
-        }
-    }
-	printk("NUMA page alloc:%d %u %u\n",i, d->tot_pages, start_pages);
-
-out:
-    a->nr_done = i;
-}
-#else
 static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memory_reservation *reservation)
 {
     struct page_info *page;
@@ -469,13 +482,25 @@ static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memo
         }
         else
         {
-//#ifdef ENABLE_MULTI_NODE
-			//if(d && d->domain_id > 0){
-			page = alloc_domheap_pages(d, a->extent_order, (a->memflags | MEMF_node(SLOW_MEMORY_NODE) | MEMF_exact_node ));
-			//}
-//#else
+#ifdef ENABLE_DRF
+            init_drf();
+
+            if(d && d->domain_id > 0) {
+            /* If returns 0, resources available*/	
+   	        if(schedule_resource(d->domain_id, (unsigned int)SLOW_MEMORY_NODE) == 0) { 	
+   	            page = alloc_domheap_pages(d, a->extent_order, 
+                         (a->memflags | MEMF_node(SLOW_MEMORY_NODE) | MEMF_exact_node));
+	        }else {
+   	            page = alloc_domheap_pages(d, a->extent_order, 
+                         (a->memflags | MEMF_node(FAST_MEMORY_NODE) | MEMF_exact_node));
+	        }	
+                goto skipmultinode;          
+            }	
+#endif
+            page = alloc_domheap_pages(d, a->extent_order, 
+               (a->memflags | MEMF_node(SLOW_MEMORY_NODE) | MEMF_exact_node ));
             //page = alloc_domheap_pages(d, a->extent_order, a->memflags);
-//#endif
+skipmultinode:
             if ( unlikely(page == NULL) ) 
             {
                 if ( !opt_tmem || (a->extent_order != 0) )
@@ -489,8 +514,7 @@ static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memo
             mfn = page_to_mfn(page);
             guest_physmap_add_page(d, gpfn, mfn, a->extent_order);
 
-            if ( !paging_mode_translate(d) )
-            {
+            if ( !paging_mode_translate(d) ) {
                 for ( j = 0; j < (1 << a->extent_order); j++ )
                     set_gpfn_from_mfn(mfn + j, gpfn + j);
 
@@ -500,12 +524,10 @@ static void hetero_populate_physmap(struct memop_args *a, struct xen_hetero_memo
             }
         }
     }
-	printk("NUMA page alloc:%d %u\n",i, d->tot_pages);
-
+    printk("NUMA page alloc:%d %u\n",i, d->tot_pages);
 out:
     a->nr_done = i;
 }
-#endif
 
 static void populate_physmap(struct memop_args *a)
 {
@@ -542,9 +564,7 @@ static void populate_physmap(struct memop_args *a)
         else
         {
 #ifdef ENABLE_MULTI_NODE
-			//if(d && d->domain_id > 0){
-			page = alloc_domheap_pages(d, a->extent_order, (a->memflags | MEMF_node(FAST_MEMORY_NODE) | MEMF_exact_node ));
-			//}
+            page = alloc_domheap_pages(d, a->extent_order, (a->memflags | MEMF_node(FAST_MEMORY_NODE) | MEMF_exact_node ));
 #else
             page = alloc_domheap_pages(d, a->extent_order, a->memflags);
 #endif
@@ -572,7 +592,7 @@ static void populate_physmap(struct memop_args *a)
             }
         }
     }
-	printk("NUMA page alloc:%d %u\n",i, d->tot_pages);
+    printk("NUMA page alloc:%d %u\n",i, d->tot_pages);
 
 out:
     a->nr_done = i;

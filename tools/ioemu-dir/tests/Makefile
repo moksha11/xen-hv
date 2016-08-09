@@ -1,1 +1,1 @@
-/usr/src/xen-hv/tools/ioemu-qemu-xen/tests/Makefile
+/usr/src/xen-hv-bergen/tools/ioemu-qemu-xen/tests/Makefile
