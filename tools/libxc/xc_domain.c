@@ -917,6 +917,7 @@ static int xc_domain_pod_target(xc_interface *xch,
         .target_pages = target_pages
     };
 
+
     err = do_memory_op(xch, op, &pod_target, sizeof(pod_target));
 
     if ( err < 0 )
