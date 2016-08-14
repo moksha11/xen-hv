@@ -3,6 +3,6 @@ include ../config-host.mak
 TARGET_ARCH=arm
 CONFIG_USER_ONLY=yes
 CONFIG_LINUX_USER=yes
-TARGET_XML_FILES= /usr/src/xen-hv-bergen/tools/ioemu-qemu-xen/gdb-xml/arm-core.xml /usr/src/xen-hv-bergen/tools/ioemu-qemu-xen/gdb-xml/arm-vfp.xml /usr/src/xen-hv-bergen/tools/ioemu-qemu-xen/gdb-xml/arm-vfp3.xml /usr/src/xen-hv-bergen/tools/ioemu-qemu-xen/gdb-xml/arm-neon.xml
+TARGET_XML_FILES= /home/sudarsun/devel/kernels/xen-hv/tools/ioemu-qemu-xen/gdb-xml/arm-core.xml /home/sudarsun/devel/kernels/xen-hv/tools/ioemu-qemu-xen/gdb-xml/arm-vfp.xml /home/sudarsun/devel/kernels/xen-hv/tools/ioemu-qemu-xen/gdb-xml/arm-vfp3.xml /home/sudarsun/devel/kernels/xen-hv/tools/ioemu-qemu-xen/gdb-xml/arm-neon.xml
 CONFIG_SOFTFLOAT=yes
 TARGET_HAS_BFLT=yes

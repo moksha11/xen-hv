@@ -1,1 +1,1 @@
-/usr/src/xen-hv-bergen/tools/ioemu-qemu-xen/tests/cris/Makefile
+/home/sudarsun/devel/kernels/xen-hv/tools/ioemu-qemu-xen/tests/cris/Makefile
