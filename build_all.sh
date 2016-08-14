@@ -1,8 +1,10 @@
 #make clean
-make -j8
-make dist -j8
-make dist-xen -j8
-make dist-tools -j8
+make -j16
+make dist -j16
+make dist-xen -j16
+make dist-tools -j16
 sudo make install
-./copy.sh
+git commit -am "hetero"
+git push origin master
+#./copy.sh
 

@@ -4,6 +4,6 @@ TARGET_ARCH=m68k
 TARGET_WORDS_BIGENDIAN=yes
 CONFIG_USER_ONLY=yes
 CONFIG_LINUX_USER=yes
-TARGET_XML_FILES= /usr/src/xen-hv/tools/ioemu-qemu-xen/gdb-xml/cf-core.xml /usr/src/xen-hv/tools/ioemu-qemu-xen/gdb-xml/cf-fp.xml
+TARGET_XML_FILES= /home/sudarsun/devel/kernels/xen-hv/tools/ioemu-qemu-xen/gdb-xml/cf-core.xml /home/sudarsun/devel/kernels/xen-hv/tools/ioemu-qemu-xen/gdb-xml/cf-fp.xml
 CONFIG_SOFTFLOAT=yes
 TARGET_HAS_BFLT=yes
